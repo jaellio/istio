@@ -377,6 +377,33 @@ func (s *Server) handleCACertsFileWatch() {
 	}
 }
 
+// handleCACertsFileWatch handles the events on cacerts files
+func initializeInitialCACertsFileWatch(ctx context.Context, cancel context.CancelFunc, watcher *fsnotify.Watcher) {
+	var timerC <-chan time.Time
+	// TODO(jaellio): how should I pass around cancel?
+	defer cancel()
+	for {
+		select {
+		case <-timerC:
+			timerC = nil
+
+		case _, ok := <-watcher.Events:
+			if !ok {
+				log.Debug("plugin cacerts watch stopped")
+				return
+			}
+			// TODO(jaellio): do I need to check file event type
+			log.Info("Got cacerts event - detected file")
+			cancel()
+		case err := <-watcher.Errors:
+			if err != nil {
+				log.Errorf("failed to catch events on cacerts file: %v", err)
+				return
+			}
+		}
+	}
+}
+
 func (s *Server) addCACertsFileWatcher(dir string) error {
 	err := s.cacertsWatcher.Add(dir)
 	if err != nil {
@@ -409,14 +436,38 @@ func (s *Server) initCACertsWatcher() {
 	go s.handleCACertsFileWatch()
 }
 
+// TODO(jaellio) - update to only read of create a cacerts secret
 // createIstioCA initializes the Istio CA signing functionality.
-// - for 'plugged in', uses ./etc/cacert directory, mounted from 'cacerts' secret in k8s.
+// - Uses ./etc/cacert directory be default, mounted from 'cacerts' secret in k8s.
 //
 //	Inside, the key/cert are 'ca-key.pem' and 'ca-cert.pem'. The root cert signing the intermediate is root-cert.pem,
 //	which may contain multiple roots. A 'cert-chain.pem' file has the full cert chain.
 func (s *Server) createIstioCA(opts *caOptions) (*ca.IstioCA, error) {
 	var caOpts *ca.IstioCAOptions
 	var err error
+
+	// Create shared context between initial cacerts file watch and
+	// istio-ca-secret check and conversion or cacerts secret creation
+	// TODO(jaellio) - Should this be in a separate function?
+	initialCACertWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Infof("failed to add CAcerts watcher: %v", err)
+		return nil, err
+	}
+
+	dir := LocalCertDir.Get()
+	log.Infof("Add initial cacerts files watcher at %v", dir)
+	err = initialCACertWatcher.Add(dir)
+	if err != nil {
+		log.Infof("AUTO_RELOAD_PLUGIN_CERTS will not work, failed to add file watcher: %v", err)
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	// TODO(jaellio) - Do we need to cancel this context here using a defer or will it always be cancelled by the time we get here?
+	defer cancel()
+
+	go initializeInitialCACertsFileWatch(ctx, cancel, initialCACertWatcher)
 
 	fileBundle, err := detectSigningCABundle()
 	if err != nil {
@@ -427,44 +478,48 @@ func (s *Server) createIstioCA(opts *caOptions) (*ca.IstioCA, error) {
 		// In Istiod, it is possible to provide one via "cacerts" secret in both cases, for consistency.
 		fileBundle.RootCertFile = ""
 	}
-	if _, err := os.Stat(fileBundle.SigningKeyFile); err != nil {
-		// The user-provided certs are missing - create a self-signed cert.
-		if s.kubeClient != nil {
-			log.Info("Use self-signed certificate as the CA certificate")
 
-			// Abort after 20 minutes.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*20)
-			defer cancel()
-			// rootCertFile will be added to "ca-cert.pem".
-			// readSigningCertOnly set to false - it doesn't seem to be used in Citadel, nor do we have a way
-			// to set it only for one job.
-			caOpts, err = ca.NewSelfSignedIstioCAOptions(ctx,
-				selfSignedRootCertGracePeriodPercentile.Get(), SelfSignedCACertTTL.Get(),
-				selfSignedRootCertCheckInterval.Get(), workloadCertTTL.Get(),
-				maxWorkloadCertTTL.Get(), opts.TrustDomain, true,
-				opts.Namespace, s.kubeClient.Kube().CoreV1(), fileBundle.RootCertFile,
-				enableJitterForRootCertRotator.Get(), caRSAKeySize.Get())
-		} else {
-			log.Warnf(
-				"Use local self-signed CA certificate for testing. Will use in-memory root CA, no K8S access and no ca key file %s",
-				fileBundle.SigningKeyFile)
+	// Check if the cacerts files are already present
+	if _, err := os.Stat(fileBundle.SigningCertFile); err != nil {
+		log.Info("No local CA certificate file found, will create a self-signed cert or find an existing istio-ca-secret")
 
-			caOpts, err = ca.NewSelfSignedDebugIstioCAOptions(fileBundle.RootCertFile, SelfSignedCACertTTL.Get(),
-				workloadCertTTL.Get(), maxWorkloadCertTTL.Get(), opts.TrustDomain, caRSAKeySize.Get())
+		go ca.CreateCACertFromIstioCASecretIfExists(ctx, SelfSignedCACertTTL.Get(), opts.TrustDomain, true, opts.Namespace, s.kubeClient.Kube().CoreV1(), fileBundle.RootCertFile,
+			enableJitterForRootCertRotator.Get(), caRSAKeySize.Get())
+
+		// Wait until the file watch sees the change
+		<-ctx.Done()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timed out waiting for cacerts files to be created: %v", ctx.Err())
+		} else if ctx.Err() == context.Canceled {
+			// TODO(jaellio) - is context.Canceled an error? How do you stop a context without it being interpreted as an error?
+			log.Info("cacerts files created, using local CA certificate file")
 		}
+
+		caOpts, err = ca.NewSelfSignedIstioCAOptions(selfSignedRootCertGracePeriodPercentile.Get(), SelfSignedCACertTTL.Get(),
+			selfSignedRootCertCheckInterval.Get(), workloadCertTTL.Get(),
+			maxWorkloadCertTTL.Get(), opts.TrustDomain, true,
+			opts.Namespace, s.kubeClient.Kube().CoreV1(),
+			enableJitterForRootCertRotator.Get(), caRSAKeySize.Get(), fileBundle)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create a self-signed istiod CA: %v", err)
+			return nil, fmt.Errorf("failed to create an istiod CA using local CA cert: %v", err)
 		}
 	} else {
-		log.Info("Use local CA certificate")
+		log.Info("Found existing signing cert, using local CA certificate files")
+
+		// TODO(jaellio) cancel file watch
+		// TODO(jaellio) - what happens here if the context was already canceled? Does there even need to be a cancel? Yes,
+		// to cancel the search for istio-ca-secret? No, that isn't the case
+		cancel()
 
 		caOpts, err = ca.NewPluggedCertIstioCAOptions(fileBundle, workloadCertTTL.Get(), maxWorkloadCertTTL.Get(), caRSAKeySize.Get())
 		if err != nil {
-			return nil, fmt.Errorf("failed to create an istiod CA: %v", err)
+			return nil, fmt.Errorf("failed to create an istiod CA using local CA cert: %v", err)
 		}
 
 		s.initCACertsWatcher()
 	}
+
 	istioCA, err := ca.NewIstioCA(caOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create an istiod CA: %v", err)

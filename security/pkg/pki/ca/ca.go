@@ -61,6 +61,7 @@ const (
 	// The standard key size to use when generating an RSA private key
 	rsaKeySize = 2048
 	// ExternalCASecret stores the plugin CA certificates, in external istiod scenario, the secret can be in the config cluster.
+	// TODO(jaellio) - rename since this will no longer just be the internal CA secret
 	ExternalCASecret = "cacerts"
 )
 
@@ -114,52 +115,16 @@ type IstioCAOptions struct {
 	RotatorConfig *SelfSignedCARootCertRotatorConfig
 }
 
-// NewSelfSignedIstioCAOptions returns a new IstioCAOptions instance using self-signed certificate.
-func NewSelfSignedIstioCAOptions(ctx context.Context,
-	rootCertGracePeriodPercentile int, caCertTTL, rootCertCheckInverval, defaultCertTTL,
-	maxCertTTL time.Duration, org string, dualUse bool, namespace string, client corev1.CoreV1Interface,
-	rootCertFile string, enableJitter bool, caRSAKeySize int,
-) (caOpts *IstioCAOptions, err error) {
-	caOpts = &IstioCAOptions{
-		CAType:         selfSignedCA,
-		DefaultCertTTL: defaultCertTTL,
-		MaxCertTTL:     maxCertTTL,
-		RotatorConfig: &SelfSignedCARootCertRotatorConfig{
-			CheckInterval:      rootCertCheckInverval,
-			caCertTTL:          caCertTTL,
-			retryInterval:      cmd.ReadSigningCertRetryInterval,
-			retryMax:           cmd.ReadSigningCertRetryMax,
-			certInspector:      certutil.NewCertUtil(rootCertGracePeriodPercentile),
-			caStorageNamespace: namespace,
-			dualUse:            dualUse,
-			org:                org,
-			rootCertFile:       rootCertFile,
-			enableJitter:       enableJitter,
-			client:             client,
-		},
-	}
-
+func CreateCACertFromIstioCASecretIfExists(ctx context.Context, caCertTTL time.Duration, org string,
+	dualUse bool, namespace string, client corev1.CoreV1Interface, rootCertFile string, enableJitter bool,
+	caRSAKeySize int) {
 	b := backoff.NewExponentialBackOff(backoff.DefaultOption())
-	err = b.RetryWithContext(ctx, func() error {
-		// For the first time the CA is up, if readSigningCertOnly is unset,
-		// it generates a self-signed key/cert pair and write it to CASecret.
-		// For subsequent restart, CA will reads key/cert from CASecret.
-		caSecret, err := client.Secrets(namespace).Get(context.TODO(), CASecret, metav1.GetOptions{})
-		if err == nil {
-			pkiCaLog.Infof("Load signing key and cert from existing secret %s/%s", caSecret.Namespace, caSecret.Name)
-			rootCerts, err := util.AppendRootCerts(caSecret.Data[CACertFile], rootCertFile)
-			if err != nil {
-				return fmt.Errorf("failed to append root certificates (%v)", err)
-			}
-			if caOpts.KeyCertBundle, err = util.NewVerifiedKeyCertBundleFromPem(caSecret.Data[CACertFile],
-				caSecret.Data[CAPrivateKeyFile], nil, rootCerts); err != nil {
-				return fmt.Errorf("failed to create CA KeyCertBundle (%v)", err)
-			}
-			pkiCaLog.Infof("Using existing public key: %v", string(rootCerts))
-			return nil
-		}
-		if apierror.IsNotFound(err) {
-			pkiCaLog.Infof("CASecret %s not found, will create one", CASecret)
+	_ = b.RetryWithContext(ctx, func() error {
+		var caCertSecret *v1.Secret
+		caSecret, err := client.Secrets(namespace).Get(ctx, CASecret, metav1.GetOptions{})
+		if err != nil && apierror.IsNotFound(err) {
+			// create self signed ca cert
+			pkiCaLog.Infof("CASecret %s not found, will create secret %s", CASecret, ExternalCASecret)
 			options := util.CertOptions{
 				TTL:          caCertTTL,
 				Org:          org,
@@ -177,67 +142,77 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 			if err != nil {
 				return fmt.Errorf("failed to append root certificates (%v)", err)
 			}
-			if caOpts.KeyCertBundle, err = util.NewVerifiedKeyCertBundleFromPem(pemCert, pemKey, nil, rootCerts); err != nil {
-				return fmt.Errorf("failed to create CA KeyCertBundle (%v)", err)
-			}
-			// Write the key/cert back to secret, so they will be persistent when CA restarts.
-			secret := BuildSecret(CASecret, namespace, nil, nil, nil, pemCert, pemKey, istioCASecretType)
-			if _, err = client.Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
-				pkiCaLog.Errorf("Failed to write secret to CA (error: %s). Abort.", err)
-				return fmt.Errorf("failed to create CA due to secret write error")
-			}
-			pkiCaLog.Infof("Using self-generated public key: %v", string(rootCerts))
-			return nil
-		}
-		return err
-	})
 
-	return caOpts, err
+			// Write the key/cert back to secret, so they will be persistent when CA restarts.
+			caCertSecret = BuildSecret(ExternalCASecret, namespace, nil, nil, nil, pemCert, pemKey, istioCASecretType)
+			pkiCaLog.Infof("Using self-generated public key: %v", string(rootCerts))
+		} else if err != nil {
+			return err
+		}
+
+		if caCertSecret == nil {
+			caCertSecret = &v1.Secret{
+				Data: caSecret.Data,
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ExternalCASecret,
+					Namespace: namespace,
+				},
+				Type: caSecret.Type,
+			}
+		}
+
+		_, err = client.Secrets(namespace).Create(ctx, caCertSecret, metav1.CreateOptions{})
+		if apierror.IsAlreadyExists(err) {
+			pkiCaLog.Infof("CASecret %s already exists, will not create one", ExternalCASecret)
+			return nil
+		} else if err != nil {
+			pkiCaLog.Errorf("Failed to write secret to CA (error: %s). Abort.", err)
+			return fmt.Errorf("failed to create CA due to secret write error")
+		}
+		return nil
+	})
 }
 
-// NewSelfSignedDebugIstioCAOptions returns a new IstioCAOptions instance using self-signed certificate produced by in-memory CA,
-// which runs without K8s, and no local ca key file presented.
-func NewSelfSignedDebugIstioCAOptions(rootCertFile string, caCertTTL, defaultCertTTL, maxCertTTL time.Duration,
-	org string, caRSAKeySize int,
+func NewSelfSignedIstioCAOptions(rootCertGracePeriodPercentile int, caCertTTL, rootCertCheckInverval, defaultCertTTL,
+	maxCertTTL time.Duration, org string, dualUse bool, namespace string, client corev1.CoreV1Interface,
+	enableJitter bool, caRSAKeySize int, fileBundle SigningCAFileBundle,
 ) (caOpts *IstioCAOptions, err error) {
-	caOpts = &IstioCAOptions{
-		CAType:         selfSignedCA,
-		DefaultCertTTL: defaultCertTTL,
-		MaxCertTTL:     maxCertTTL,
-		CARSAKeySize:   caRSAKeySize,
-	}
-
-	options := util.CertOptions{
-		TTL:          caCertTTL,
-		Org:          org,
-		IsCA:         true,
-		IsSelfSigned: true,
-		RSAKeySize:   caRSAKeySize,
-		IsDualUse:    true, // hardcoded to true for K8S as well
-	}
-	pemCert, pemKey, ckErr := util.GenCertKeyFromOptions(options)
-	if ckErr != nil {
-		return nil, fmt.Errorf("unable to generate CA cert and key for self-signed CA (%v)", ckErr)
-	}
-
-	rootCerts, err := util.AppendRootCerts(pemCert, rootCertFile)
+	caOpts, err = newCACertsIstioCAOptions(fileBundle,
+		defaultCertTTL, maxCertTTL, caRSAKeySize, selfSignedCA)
 	if err != nil {
-		return nil, fmt.Errorf("failed to append root certificates (%v)", err)
+		return
 	}
 
-	if caOpts.KeyCertBundle, err = util.NewVerifiedKeyCertBundleFromPem(pemCert, pemKey, nil, rootCerts); err != nil {
-		return nil, fmt.Errorf("failed to create CA KeyCertBundle (%v)", err)
+	// TODO(jaellio) - remove this once we can fully merge self-signed and plugged cert CAs functionality.
+	caOpts.RotatorConfig = &SelfSignedCARootCertRotatorConfig{
+		CheckInterval:      rootCertCheckInverval,
+		caCertTTL:          caCertTTL,
+		retryInterval:      cmd.ReadSigningCertRetryInterval,
+		retryMax:           cmd.ReadSigningCertRetryMax,
+		certInspector:      certutil.NewCertUtil(rootCertGracePeriodPercentile),
+		caStorageNamespace: namespace,
+		dualUse:            dualUse,
+		org:                org,
+		// What is this file used for, could the value be obtained from the filebundle.
+		rootCertFile: fileBundle.RootCertFile,
+		enableJitter: enableJitter,
+		client:       client,
 	}
-
 	return caOpts, nil
 }
 
-// NewPluggedCertIstioCAOptions returns a new IstioCAOptions instance using given certificate.
 func NewPluggedCertIstioCAOptions(fileBundle SigningCAFileBundle,
 	defaultCertTTL, maxCertTTL time.Duration, caRSAKeySize int,
+) (capOpts *IstioCAOptions, err error) {
+	return newCACertsIstioCAOptions(fileBundle, defaultCertTTL,
+		maxCertTTL, caRSAKeySize, pluggedCertCA)
+}
+
+// NewPluggedCertIstioCAOptions returns a new IstioCAOptions instance using given certificate.
+func newCACertsIstioCAOptions(fileBundle SigningCAFileBundle, defaultCertTTL, maxCertTTL time.Duration, caRSAKeySize int, caType caTypes,
 ) (caOpts *IstioCAOptions, err error) {
 	caOpts = &IstioCAOptions{
-		CAType:         pluggedCertCA,
+		CAType:         caType,
 		DefaultCertTTL: defaultCertTTL,
 		MaxCertTTL:     maxCertTTL,
 		CARSAKeySize:   caRSAKeySize,

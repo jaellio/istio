@@ -113,12 +113,12 @@ func (rotator *SelfSignedCARootCertRotator) Run(stopCh chan struct{}) {
 // checkAndRotateRootCert decides whether root cert should be refreshed, and rotates
 // root cert for self-signed Citadel.
 func (rotator *SelfSignedCARootCertRotator) checkAndRotateRootCert() {
-	caSecret, scrtErr := rotator.caSecretController.LoadCASecretWithRetry(CASecret,
+	caSecret, scrtErr := rotator.caSecretController.LoadCASecretWithRetry(ExternalCASecret,
 		rotator.config.caStorageNamespace, rotator.config.retryInterval, rotator.config.retryMax)
 
 	if scrtErr != nil {
 		rootCertRotatorLog.Errorf("Fail to load CA secret %s:%s (error: %s), skip cert rotation job",
-			rotator.config.caStorageNamespace, CASecret, scrtErr.Error())
+			rotator.config.caStorageNamespace, ExternalCASecret, scrtErr.Error())
 	} else {
 		rotator.checkAndRotateRootCertForSigningCertCitadel(caSecret)
 	}
@@ -132,7 +132,7 @@ func (rotator *SelfSignedCARootCertRotator) checkAndRotateRootCertForSigningCert
 ) {
 	if caSecret == nil {
 		rootCertRotatorLog.Errorf("root cert secret %s is nil, skip cert rotation job",
-			CASecret)
+			ExternalCASecret)
 		return
 	}
 	// Check root certificate expiration time in CA secret
@@ -220,10 +220,10 @@ func (rotator *SelfSignedCARootCertRotator) checkAndRotateRootCertForSigningCert
 func (rotator *SelfSignedCARootCertRotator) updateRootCertificate(caSecret *v1.Secret, rollForward bool, cert, key, rootCert []byte) (bool, error) {
 	var err error
 	if caSecret == nil {
-		caSecret, err = rotator.caSecretController.LoadCASecretWithRetry(CASecret,
+		caSecret, err = rotator.caSecretController.LoadCASecretWithRetry(ExternalCASecret,
 			rotator.config.caStorageNamespace, rotator.config.retryInterval, rotator.config.retryMax)
 		if err != nil {
-			return false, fmt.Errorf("failed to load CA secret %s:%s (error: %s)", rotator.config.caStorageNamespace, CASecret,
+			return false, fmt.Errorf("failed to load CA secret %s:%s (error: %s)", rotator.config.caStorageNamespace, ExternalCASecret,
 				err.Error())
 		}
 	}
