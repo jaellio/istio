@@ -6,15 +6,13 @@ This document describes the high level architecture of Istiod's Certificate Auth
 
 > Note: This document focusses on the enablement and disablement of the CA or RA and the Istio CSR workflow. It does not explore all possible CA configurations supported by Istio and it is not meant to function as a "How to" guide for configuring the CA or RA. Please visit [istio.io](https://istio.io/latest/docs/tasks/security/cert-management/) for guidence on how to configure Istio.
 
-At a high level, Istiod can serve as CA or RA and supports integrations with custom CAs via the kubernetes CSR API, for example. Istio relies on the trusted identities provided the CA to establish secure, encrypted communication between Istiod and other components and from workload to workload in the service mesh. 
+At a high level, Istiod can serve as the CA or RA and supports integrations with custom CAs via the kubernetes CSR API, for example. Istio relies on the trusted identities provided the CA to establish secure, encrypted communication between Istiod and other components and from workload to workload in the service mesh. 
 
 To provision certificates for Istiod and related webhooks, Istiod will make internal CSR requests or requests to a custom CA. Depending on the environment and variables set on install, Istiod will expose a gRPC service to accept Istio CSR requests from an istio-agent. More on the istio-agent and generation of Istio CSRs can be found in the [istio-agent architecture doc](/architecture/security/istio-agent.md).
 
-## High level components
-
 ### Chiron
 
-Internal package that prrovides the functionality to create a certificiate, create a Kubernetes CSR resource, approve a CSR, read the signed certificate, and clean up the remaining artifacts. The package is utilized when the Kubernetes CA is configured as the certificate authority for Istiod.
+Internal package that provides the functionality to create a certificiate, create a Kubernetes CSR resource, approve a CSR, read the signed certificate, and clean up the remaining artifacts. The package is utilized when the Kubernetes CA is configured as the certificate authority for Istiod.
 
 ### Kubernetes CSR
 
@@ -22,104 +20,35 @@ Created by Istiod to request new certificates for itself and meshed workloads. K
 
 ### Istio CSR
 
-Proto buffer definition of an Istio Certificate Signing Request. Defined by [ca.proto](). Used by the istio-agent and istiod to communicate desired workload cert information and issuer. The istio-agent generates an Istio CSR for the corresponding workload and sends the request to Istiod. Istiod responds with a signed certificate if the request is successfully authenticated and authorized.
+Protocol buffer definition of an Istio Certificate Signing Request. Defined by [ca.proto](https://github.com/istio/api/blob/405bf0a1a26230e2a9c6bb249ffc68f49a11a91c/security/v1alpha1/ca.proto). Used by the istio-agent and istiod to communicate desired workload cert information and issuer. The istio-agent generates an Istio CSR for the corresponding workload and sends the request to Istiod. Istiod responds with a signed certificate if the request is successfully authenticated and authorized. Authentication of the Istio CSR is based on bearer tokens carried in the side channel and the client-side certificate via mTLS handshake. The server side mish authenticate the caller is authorized to all SANs included in the CSR. The server may overwrite any requested certificate field base on its configured policies.
 
-```proto
-// Certificate request message. The authentication should be based on:
-// 1. Bearer tokens carried in the side channel;
-// 2. Client-side certificate via Mutual TLS handshake.
-// Note: the service implementation is REQUIRED to verify the authenticated caller is authorize to
-// all SANs in the CSR. The server side may overwrite any requested certificate field based on its
-// policies.
-message IstioCertificateRequest {
-  // PEM-encoded certificate request.
-  // The public key in the CSR is used to generate the certificate,
-  // and other fields in the generated certificate may be overwritten by the CA.
-  string csr = 1;
-  // Optional: requested certificate validity period, in seconds.
-  int64 validity_duration = 3;
+#### CSR authenticators
 
-  // $hide_from_docs
-  // Optional: Opaque metadata provided by the XDS node to Istio.
-  // Supported metadata: WorkloadName, WorkloadIP, ClusterID
-  google.protobuf.Struct metadata = 4;
-}
-```
+TODO
 
 ### CertificateAuthority
 
-Internal interface that defines methods to be supported by a CA type. Implemented by `IstioCA` and `KubernetesRA`.
+Internal interface that defines methods to be supported by a CA type and abstracts implementation details of how a certificate is signed and how a CA bundle is retrieved. Implemented by [`IstioCA`](#istioca) and [`KubernetesRA`](#kubernetesra).
 
-```go
-// CertificateAuthority contains methods to be supported by a CA.
-type CertificateAuthority interface {
-    // Sign generates a certificate for a workload or CA, from the given CSR and cert opts.
-    Sign(csrPEM []byte, opts ca.CertOpts) ([]byte, error)
-    // SignWithCertChain is similar to Sign but returns the leaf cert and the entire cert chain.
-    SignWithCertChain(csrPEM []byte, opts ca.CertOpts) ([]string, error)
-    // GetCAKeyCertBundle returns the KeyCertBundle used by CA.
-    GetCAKeyCertBundle() *util.KeyCertBundle
-}
-```
+#### KubernetesRA
 
-### CA/RA Server
+If the `EXTERNAL_CA` is set to `ISTIO_RA_KUBERNETES_API` on install, a `KubernetesRA` will be initialized as the internal represenation of a RA which integrates with an external CA using the Kubernetes CSR API.
 
-The CA or RA services are represented using the same internal type, `Server`. `ca` is set to either `IstioCA` or `KubernetesRA`.
+#### IstioCA
 
-```go
-// Server implements IstioCAService and IstioCertificateService and provides the services on the
-// specified port.
-type Server struct {
-    pb.UnimplementedIstioCertificateServiceServer
-    monitoring     monitoringMetrics
-    Authenticators []security.Authenticator
-    ca             CertificateAuthority
-    serverCertTTL  time.Duration
+If a external or custom CA is not specified on install, an `IstioCA` will be initilized as the internal representation of the CA. In this scenario, Istiod functions as the CA and RA and makes no external CA calls.
 
+### Root certificate
 
-    nodeAuthorizer *NodeAuthorizer
-}
-```
+The private key of a root certificate is used to sign/issue leaf and intermediate certicates. A root or intermediate certificate the has inheritted the trust of the root certificate can function as a CA.
 
-### KubernetesRA
+When Istiod functions as the RA and CA, the root certificate can either be generated by Istiod on start up or provided by the user via a `cacerts` Kubernetes Secret which is volume mounted to the pod. Visit [Plug in CA Certificates](https://istio.io/latest/docs/tasks/security/cert-management/plugin-ca-cert/) for more information on bringing your own root certificate.
 
-Implementation of the `CertificateAuthority` Interface. If the `EXTERNAL_CA` is set to `ISTIO_RA_KUBERNETES_API` on install, a `KubernetesRA` will be initialized as the internal represenation of a RA which integrates with an external CA using the Kubernetes CSR API.
+When Istiod functions as the RA, it is not responsible for generating or obtaining the root certificate. The private key of the root or intermediate certificate should only be accessible to the CA signing certificates. Istiod is responsible for authenticating and authorizing the CSRs coming from workloads by understanding the mapping of Kubernetes identities and the Istio (SPIFFE) identities. The custom CA only needs to authenticate and authorize Istiod's identity. This could be achieved by explicitly validating Istiod's Kubernetes JWT or a custom token or implicitly by granting Istiod RBAC to write special Kubernetes resources (like CSRs). This example certificate issuance flow would be dependent on the Kubernetes API.
 
-```go
-// KubernetesRA integrated with an external CA using Kubernetes CSR API
-type KubernetesRA struct {
-    csrInterface                 clientset.Interface
-    keyCertBundle                *util.KeyCertBundle
-    raOpts                       *IstioRAOptions
-    caCertificatesFromMeshConfig map[string]string
-    certSignerDomain             string
-    // mutex protects the R/W to caCertificatesFromMeshConfig.
-    mutex sync.RWMutex
-}
-```
+## High level CA and RA creation workflow
 
-### IstioCA
-
-Implementation of the `CertificateAuthority` Interface. If a external or custom CA is not specified on install, an `IstioCA` will be initilized as the internal representation of the CA. In this scenario, Istiod functions as the CA and RA and makes no external CA calls.
-
-```go
-// IstioCA generates keys and certificates for Istio identities.
-type IstioCA struct {
-    defaultCertTTL time.Duration
-    maxCertTTL     time.Duration
-    caRSAKeySize   int
-
-
-    keyCertBundle *util.KeyCertBundle
-
-
-    // rootCertRotator periodically rotates self-signed root cert for CA. It is nil
-    // if CA is not self-signed CA.
-    rootCertRotator *SelfSignedCARootCertRotator
-}
-```
-
-## High level CA and RA creation workdflow
+On Istiod start up a CA service, RA service, or neither are provisioned. The following diagram and description explain the environment variables and conditional checks involved in determing the certificate workflow for the Istio control plane and meshed workloads.
 
 ![CA and RA creation flow](docs/ca-ra-initialization.svg)
 
@@ -130,11 +59,11 @@ type IstioCA struct {
 
 > Note: More details on the supported environment variables can be found in [Environment Variable](#environment-variables) section.
 
-### Components
+## High level CSR request workflow 
 
-Each RA and CA service is registered on the existing Server (different the the server defined above) in the RunCA method.
+TODO - diagram, description, and demonstration of trust 
 
-TODO(jaellio)
+Each RA and CA service is registered on the existing Istiod server.
 
 | Variable | Description | 
 | - | - | 
@@ -142,8 +71,7 @@ TODO(jaellio)
 | AUDIENCE | Expected audience in the tokens. If not set and a mounted token is present at a well known location token aud defaults to istio-ca. It is based on the istiod.yaml configuration. Env variable takes precedence over the yaml configuration and default.<br /><br />Checked when starting the CA/RA service on the istiod server. |
 | CA_TRUSTED_NODE_ACCOUNTS | If set, the list of service accounts that are allowed to use node authentication for CSRs. Node authentication allows an identity to create CSRs on behalf of other identities, but only if there is a pod running on the same node with that identity. This is intended for use with node proxies.<br /><br /> Results in the creation of `NodeAuthorizors` to validate node proxy is requesting an ididty of a workload on it’s own node. |
 
-
-### Environment variables
+## Environment variables
 
 | Variable | Supported Values | Description |
 | - | - | - |
@@ -152,3 +80,6 @@ TODO(jaellio)
 | EXTERNAL_CA | `ISTIOD_RA_KUBERNETES_API`, “” (default) | External CA Integration Type. If set, Istiod will configure a RA to make signing requests. By default Istiod will not create a RA.<br /><br /> `ISTIOD_RA_KUBERNETES_API` specified that Istiod should integrate with an external CA using k8s CSR API.<br /><br /> |
 | PILOT_CERT_PROVIDER | `"Kubernetes"`, `“k8s.io/”`, `“custom”`, `“istiod”`, `“none”`, “” (default) | The provider of the Pilot DNS certificate.<br /><br /> `“Kubernetes”` specifies the Kubernetes CSR API to generate a DNS certificate for the control plane.<br /><br /> `“k8s.io/”` specifies the Kubernetes CSR API and the specified signer to generate a DNS certificate for the control plane.<br /><br /> `“Custom”` specifies the root certificate is mounted in a well known location for the control plane.<br /><br /> `“Istiod”` specifies the istiod self-signed DNS certificate should be used for fot the control plane.<br /><br />`“None”` specifies that no certificate should be created from the control plane. It is assumed that some external load balancer, such as an Istiod Gateway, is terminating the TLS. |
 
+## RFCs
+
+- [Istio Integrating with custom CAs](https://docs.google.com/document/d/1KAw8-0FivdYQAcWMVTMl-JYvVCn2fpNTbu6Ya3y9d1E/edit)
