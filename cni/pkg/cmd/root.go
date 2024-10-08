@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -75,20 +76,30 @@ var rootCmd = &cobra.Command{
 		log.Infof("CNI install configuration: \n%+v", cfg.InstallConfig)
 		log.Infof("CNI race repair configuration: \n%+v", cfg.RepairConfig)
 
-		// Start metrics server
-		monitoring.SetupMonitoring(cfg.InstallConfig.MonitoringPort, "/metrics", ctx.Done())
-
-		// Start UDS log server
-		udsLogger := udsLog.NewUDSLogger(log.GetOutputLevel())
-		if err = udsLogger.StartUDSLogServer(filepath.Join(cfg.InstallConfig.CNIAgentRunDir, constants.LogUDSSocketName), ctx.Done()); err != nil {
-			log.Errorf("Failed to start up UDS Log Server: %v", err)
-			return
+		log.Warnf("jaellio: init-only: %v", cfg.InstallConfig.InitOnly)
+		log.Warnf("jaellio: unprivileged-only: %v", cfg.InstallConfig.UnprivilegedOnly)
+		
+		if (cfg.InstallConfig.InitOnly || cfg.InstallConfig.UnprivilegedOnly) && cfg.InstallConfig.AmbientEnabled {
+			return fmt.Errorf("init-only and unprivileged-only are incompatible with ambient-mode")
 		}
 
-		// Creates a basic health endpoint server that reports health status
-		// based on atomic flag, as set by installer
-		// TODO nodeagent watch server should affect this too, and drop atomic flag
-		installDaemonReady, watchServerReady := nodeagent.StartHealthServer()
+		var installDaemonReady, watchServerReady *atomic.Value
+		if !cfg.InstallConfig.InitOnly{
+			// Start metrics server
+			monitoring.SetupMonitoring(cfg.InstallConfig.MonitoringPort, "/metrics", ctx.Done())
+
+			// Start UDS log server
+			udsLogger := udsLog.NewUDSLogger(log.GetOutputLevel())
+			if err = udsLogger.StartUDSLogServer(filepath.Join(cfg.InstallConfig.CNIAgentRunDir, constants.LogUDSSocketName), ctx.Done()); err != nil {
+				log.Errorf("Failed to start up UDS Log Server: %v", err)
+				return
+			}
+
+			// Creates a basic health endpoint server that reports health status
+			// based on atomic flag, as set by installer
+			// TODO nodeagent watch server should affect this too, and drop atomic flag
+			installDaemonReady, watchServerReady = nodeagent.StartHealthServer()
+		}
 
 		if cfg.InstallConfig.AmbientEnabled {
 			// Start ambient controller
@@ -115,34 +126,51 @@ var rootCmd = &cobra.Command{
 
 			log.Info("Ambient node agent started, starting installer...")
 
-		} else {
+		} else if !cfg.InstallConfig.InitOnly && !cfg.InstallConfig.UnprivilegedOnly {
 			// Ambient not enabled, so this readiness flag is no-op'd
 			watchServerReady.Store(true)
+		} else if !cfg.InstallConfig.InitOnly {
+			// Unprivileged only mode, so watch and install readiness flag is no-op'd
+			watchServerReady.Store(true)
+			installDaemonReady.Store(true)
 		}
 
 		installer := install.NewInstaller(&cfg.InstallConfig, installDaemonReady)
 
-		repair.StartRepair(ctx, cfg.RepairConfig)
+		if !cfg.InstallConfig.InitOnly && !cfg.InstallConfig.UnprivilegedOnly {
+			repair.StartRepair(ctx, cfg.RepairConfig)
+		}
 
-		log.Info("initialization complete, watching node CNI dir")
-		// installer.Run() will block indefinitely, and attempt to permanently "keep"
-		// the CNI binary installed.
-		if err = installer.Run(ctx); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				log.Infof("installer complete: %v", err)
-				// Error was caused by interrupt/termination signal
-				err = nil
-			} else {
-				log.Errorf("installer failed: %v", err)
+		if !cfg.InstallConfig.UnprivilegedOnly {
+			// if installing in init-only mode installer.Run() will return after initial installation.
+			// Otherwise, installer.Run() will block indefinitely and attempt to permanently "keep"
+			// the CNI binary installed.
+			if err = installer.Run(ctx); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					log.Infof("installer complete: %v", err)
+					// Error was caused by interrupt/termination signal
+					err = nil
+				} else {
+					log.Errorf("installer failed: %v", err)
+				}
 			}
 		}
 
-		if cleanErr := installer.Cleanup(); cleanErr != nil {
-			if err != nil {
-				err = fmt.Errorf("%s: %w", cleanErr.Error(), err)
-			} else {
-				err = cleanErr
+		if !cfg.InstallConfig.InitOnly && !cfg.InstallConfig.UnprivilegedOnly {
+			// TODO(jaellio): Only cleanup if we are not in init-only/unpriviliged-only mode
+			if cleanErr := installer.Cleanup(); cleanErr != nil {
+				if err != nil {
+					err = fmt.Errorf("%s: %w", cleanErr.Error(), err)
+				} else {
+					err = cleanErr
+				}
 			}
+		}
+
+		if cfg.InstallConfig.UnprivilegedOnly {
+			// Since we are not blocking on installer.Run(), we need to wait for the context to be done
+			<-ctx.Done()
+			log.Info("UDS Log Server and Monitoring Server have successfully terminated")
 		}
 
 		return
@@ -172,6 +200,12 @@ func init() {
 	registerBooleanParameter(constants.ChainedCNIPlugin, true, "Whether to install CNI plugin as a chained or standalone")
 	registerStringParameter(constants.CNINetworkConfig, "", "CNI configuration template as a string")
 	registerStringParameter(constants.LogLevel, "warn", "Fallback value for log level in CNI config file, if not specified in helm template")
+
+	// Parameters to support privileged init container
+	registerBooleanParameter(constants.InitOnly, false, "Whether to run the installer in init-only mode. Disables the repair controller and"+
+		"reconciliation logic. Enabling init-only mode is incompatible with ambient-mode.")
+	registerBooleanParameter(constants.UnprivilegedOnly, false, "Whether to run the installer in unprivileged-only mode and skip CNI installation."+
+		"Disables the repair controller and reconciliation logic. Enabling unprivileged-only in incompatible with ambient-mode.")
 
 	// Not configurable in CNI helm charts
 	registerStringParameter(constants.MountedCNINetDir, "/host/etc/cni/net.d", "Directory on the container where CNI networks are installed")
@@ -243,6 +277,9 @@ func constructConfig() (*config.Config, error) {
 		CNIConfName:      viper.GetString(constants.CNIConfName),
 		ChainedCNIPlugin: viper.GetBool(constants.ChainedCNIPlugin),
 		CNIAgentRunDir:   viper.GetString(constants.CNIAgentRunDir),
+
+		InitOnly: viper.GetBool(constants.InitOnly),
+		UnprivilegedOnly: viper.GetBool(constants.UnprivilegedOnly),
 
 		// Whatever user has set (with --log_output_level) for 'cni-plugin', pass it down to the plugin. It will use this to determine
 		// what level to use for itself.

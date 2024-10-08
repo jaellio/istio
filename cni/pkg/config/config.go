@@ -82,6 +82,12 @@ type InstallConfig struct {
 
 	// Feature flag to determined whether TPROXY is used for redirection.
 	AmbientTPROXYRedirection bool
+
+	// Whether to perform privileged operations only during init
+	InitOnly bool
+
+	// Whether to perform only unprivileged operations during install-cni
+	UnprivilegedOnly bool 
 }
 
 // RepairConfig struct defines the Istio CNI race repair configuration
@@ -123,6 +129,8 @@ func (c InstallConfig) String() string {
 	b.WriteString("CNIConfName: " + c.CNIConfName + "\n")
 	b.WriteString("ChainedCNIPlugin: " + fmt.Sprint(c.ChainedCNIPlugin) + "\n")
 	b.WriteString("CNIAgentRunDir: " + fmt.Sprint(c.CNIAgentRunDir) + "\n")
+	b.WriteString("InitOnly:" + fmt.Sprint(c.InitOnly) + "\n")
+	b.WriteString("UnprivilegedOnly:" + fmt.Sprint(c.UnprivilegedOnly) + "\n")
 
 	b.WriteString("PluginLogLevel: " + c.PluginLogLevel + "\n")
 	b.WriteString("KubeconfigMode: " + fmt.Sprintf("%#o", c.KubeconfigMode) + "\n")

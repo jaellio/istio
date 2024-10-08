@@ -264,11 +264,13 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 		return nil
 	}
 
+	// If proxy type is set and not sidecar, exclude the pod from sidecar redirection configuration
 	if pi.ProxyType != "" && pi.ProxyType != "sidecar" {
 		log.Infof("excluded %s/%s pod because it has proxy type %s", podNamespace, podName, pi.ProxyType)
 		return nil
 	}
 
+	// Check if injection is disabled via annotation
 	val := pi.Annotations[injectAnnotationKey]
 	if lbl, labelPresent := pi.Labels[label.SidecarInject.Name]; labelPresent {
 		// The label is the new API; if both are present we prefer the label
@@ -297,6 +299,7 @@ func doAddRun(args *skel.CmdArgs, conf *Config, kClient kubernetes.Interface, ru
 		return err
 	}
 
+	// Program Iptables rules for sidecar redirection
 	if err := rulesMgr.Program(podName, args.Netns, redirect); err != nil {
 		return err
 	}

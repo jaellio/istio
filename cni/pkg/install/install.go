@@ -102,6 +102,10 @@ func (in *Installer) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if in.cfg.InitOnly {
+		installLog.Info("initial installation complete, skip watching for re-installation")
+		return nil
+	}
 	installLog.Info("initial installation complete, start watching for re-installation")
 	throttle := newInstallationThrottle(in)
 	for {

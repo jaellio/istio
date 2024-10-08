@@ -25,7 +25,6 @@ _internal_defaults_do_not_set:
   # documentation for the appropriate path.
   cniNetnsDir: # Defaults to '/var/run/netns', in minikube/docker/others can be '/var/run/docker/netns'.
 
-
   excludeNamespaces:
     - kube-system
 
@@ -34,6 +33,12 @@ _internal_defaults_do_not_set:
 
   # Custom annotations on pod level, if you need them
   podAnnotations: {}
+
+  # Whether the DaemonSet should be run as privileged or not. Setting this value to false is not compatible with
+  # ambient mode. Furthermore, the repair controller will automatically be turned off if privileged is disabled.
+  # An init container will be created that performs the necessary setup for the CNI plugin to run without privileged
+  # mode.
+  privileged: true
 
   # Deploy the config files as plugin chain (value "true") or as standalone files in the conf dir (value "false")?
   # Some k8s flavors (e.g. OpenShift) do not support the chain approach, set to false if this is the case

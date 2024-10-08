@@ -36,6 +36,8 @@ const (
 	AmbientDNSCapture        = "ambient-dns-capture"
 	AmbientIPv6              = "ambient-ipv6"
 	AmbientTPROXYRedirection = "ambient-tproxy-redirection"
+	InitOnly                 = "init-only"
+	UnprivilegedOnly         = "unprivileged-only"
 
 	// Repair
 	RepairEnabled            = "repair-enabled"
