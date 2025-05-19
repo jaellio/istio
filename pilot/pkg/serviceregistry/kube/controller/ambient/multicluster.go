@@ -197,7 +197,7 @@ func (a *index) buildGlobalCollections(
 			return model.ConfigKey{Kind: kind.AuthorizationPolicy, Name: i.Authorization.Name, Namespace: i.Authorization.Namespace}
 		}), false)
 
-	LocalWorkloadServices := a.ServicesCollection(localCluster.ID, localCluster.services, localServiceEntries, LocalWaypoints, LocalNamespaces, opts)
+	LocalWorkloadServices := a.ServicesCollection(localCluster.ID, localCluster.services, localServiceEntries, LocalWaypoints, LocalNamespaces, LocalMeshConfig, opts)
 	// All of this is local only, but we need to do it here so we don't have to rebuild collections in ambientindex
 	if features.EnableAmbientStatus {
 		serviceEntriesWriter := kclient.NewWriteClient[*networkingclient.ServiceEntry](options.Client)
@@ -239,6 +239,7 @@ func (a *index) buildGlobalCollections(
 		LocalWorkloadServices,
 		LocalWaypoints,
 		clusters,
+		LocalMeshConfig,
 		localServiceEntries,
 		GlobalServices,
 		serviceInformersByCluster,

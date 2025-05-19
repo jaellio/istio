@@ -85,6 +85,7 @@ func GlobalMergedWorkloadServicesCollection(
 	localServiceInfos krt.Collection[model.ServiceInfo],
 	localWaypoints krt.Collection[Waypoint],
 	clusters krt.Collection[*Cluster],
+	meshConfig krt.Singleton[MeshConfig],
 	localServiceEntries krt.Collection[*networkingclient.ServiceEntry],
 	globalServices krt.Collection[krt.Collection[*v1.Service]],
 	servicesByCluster krt.Index[cluster.ID, krt.Collection[*v1.Service]],
@@ -135,7 +136,7 @@ func GlobalMergedWorkloadServicesCollection(
 			// We can't have duplicate collections (otherwise FetchOne will panic) so use
 			// sync.Once to ensure we only create the collection once and return that same value
 			// TODO(jaellio): how are we going to get collections here?
-			servicesInfo := krt.NewCollection(services, serviceServiceBuilder(waypoints, namespaces, domainSuffix, func(ctx krt.HandlerContext) network.ID {
+			servicesInfo := krt.NewCollection(services, serviceServiceBuilder(waypoints, namespaces, meshConfig, domainSuffix, func(ctx krt.HandlerContext) network.ID {
 				nwPtr := krt.FetchOne(ctx, globalNetworks.RemoteSystemNamespaceNetworks, krt.FilterIndex(globalNetworks.SystemNamespaceNetworkByCluster, cluster.ID))
 				if nwPtr == nil {
 					log.Warnf("Cluster %s does not have network assigned yet, skipping", cluster.ID)
@@ -207,7 +208,10 @@ func serviceServiceBuilder(
 
 		// TODO(jaellio): update on meshConfig change? Need a lock?
 		meshCfg := krt.FetchOne(ctx, meshConfig.AsCollection())
-		serviceScope := MatchServiceScope(meshCfg, namespaces, s)
+		var serviceScope model.ServiceScope
+		if meshCfg != nil {
+			serviceScope = MatchServiceScope(meshCfg, namespaces, s)
+		}
 		
 		return precomputeServicePtr(&model.ServiceInfo{
 			Service:       svc,
@@ -215,7 +219,7 @@ func serviceServiceBuilder(
 			LabelSelector: model.NewSelector(s.Spec.Selector),
 			Source:        MakeSource(s),
 			Waypoint:      waypointStatus,
-			Scope: serviceScope,
+			Scope:         serviceScope,
 		})
 	}
 }
@@ -345,7 +349,7 @@ func LabelSelectorAsSelector(ps *meshapi.LabelSelector) (labels.Selector, error)
 }
 
 func MatchServiceScope(meshCfg *MeshConfig, namespaces krt.Collection[*v1.Namespace], s *v1.Service) model.ServiceScope {
-	// Apply label selectors from meshconfig's servieScopeConfig to determine the scope of the service based on the namespace
+	// Apply label selectors from the MeshConfig's servieScopeConfig to determine the scope of the service based on the namespace
 	// or service label matches
 	// Check if the service matches any label selectors defined in the meshConfig's serviceScopeConfig.
     for _, scopeConfig := range meshCfg.ServiceScopeConfigs {
@@ -355,7 +359,7 @@ func MatchServiceScope(meshCfg *MeshConfig, namespaces krt.Collection[*v1.Namesp
 			log.Warnf("failed to convert namespace selector: %v", err)
 			continue
 		}
-		// TODO(jaellio): is the a sufficient way to check if the selector is empty?
+		// TODO(jaellio): is this a sufficient way to check if the selector is empty?
 		if nss == labels.NewSelector() {
 			nss = labels.Everything()
 		}
