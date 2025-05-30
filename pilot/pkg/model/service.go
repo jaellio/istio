@@ -921,6 +921,7 @@ type AmbientIndexes interface {
 	Policies(requested sets.Set[ConfigKey]) []WorkloadAuthorization
 	ServicesForWaypoint(WaypointKey) []ServiceInfo
 	WorkloadsForWaypoint(WaypointKey) []WorkloadInfo
+	ServicesForGateway() []ServiceInfo
 }
 
 // NoopAmbientIndexes provides an implementation of AmbientIndexes that always returns nil, to easily "skip" it.
@@ -943,6 +944,10 @@ func (u NoopAmbientIndexes) Policies(sets.Set[ConfigKey]) []WorkloadAuthorizatio
 }
 
 func (u NoopAmbientIndexes) ServicesForWaypoint(WaypointKey) []ServiceInfo {
+	return nil
+}
+
+func (u NoopAmbientIndexes) ServicesForGateway() []ServiceInfo {
 	return nil
 }
 
