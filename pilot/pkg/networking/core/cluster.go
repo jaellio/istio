@@ -313,7 +313,6 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 	hit, miss := 0, 0
 	for _, service := range services {
 		if service.Resolution == model.Alias || service.Hostname.IsWildCarded() {
-			log.Debugf("grnmeira: ignoring %v", service.Hostname)
 			continue
 		}
 		for _, port := range service.Ports {
