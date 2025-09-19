@@ -287,7 +287,7 @@ func (cb *ClusterBuilder) buildSubsetCluster(
 		lbEndpoints = endpointBuilder.WithSubset(subset.Name).FromServiceEndpoints()
 	}
 
-	subsetCluster := cb.buildCluster(subsetClusterName, &clusterType, lbEndpoints, model.TrafficDirectionOutbound, opts.port, service, nil, subset.Name)
+	subsetCluster := cb.buildCluster(subsetClusterName, clusterType, lbEndpoints, model.TrafficDirectionOutbound, opts.port, service, nil, subset.Name)
 	if subsetCluster == nil {
 		return nil
 	}
@@ -395,102 +395,79 @@ func (cb *ClusterBuilder) applyMetadataExchange(c *cluster.Cluster) {
 }
 
 // buildCluster builds the default cluster and also applies global options.
-// It is used for building both inbound and outbound cluster. If no discoveryType is provided,
-// it builds a dynamic forward proxy cluster.
-func (cb *ClusterBuilder) buildCluster(name string, discoveryType *cluster.Cluster_DiscoveryType,
+// It is used for building both inbound and outbound cluster.
+func (cb *ClusterBuilder) buildCluster(name string, discoveryType cluster.Cluster_DiscoveryType,
 	localityLbEndpoints []*endpoint.LocalityLbEndpoints, direction model.TrafficDirection,
 	port *model.Port, service *model.Service, inboundServices []model.ServiceTarget,
 	subset string,
 ) *clusterWrapper {
-	var c *cluster.Cluster
-	if discoveryType == nil {
-		c = &cluster.Cluster{
-			Name:     name,
-			LbPolicy: cluster.Cluster_CLUSTER_PROVIDED,
-			ClusterDiscoveryType: &cluster.Cluster_ClusterType{ClusterType: &cluster.Cluster_CustomClusterType{
-				// TODO(grnmeira): move this to a constant
-				Name: "envoy.clusters.dynamic_forward_proxy",
-				TypedConfig: protoconv.MessageToAny(&dfpcluster.ClusterConfig{
-					ClusterImplementationSpecifier: &dfpcluster.ClusterConfig_DnsCacheConfig{
-						DnsCacheConfig: &dfpcommon.DnsCacheConfig{
-							Name:            model.BuildDNSCacheName(service.Hostname),
-							DnsLookupFamily: cluster.Cluster_V4_ONLY,
-						},
-					},
-				}),
-			}},
-		}
-	} else {
-		c = &cluster.Cluster{
-			Name:                 name,
-			ClusterDiscoveryType: &cluster.Cluster_Type{Type: *discoveryType},
-			CommonLbConfig:       &cluster.Cluster_CommonLbConfig{},
-		}
+	c := &cluster.Cluster{
+		Name:                 name,
+		ClusterDiscoveryType: &cluster.Cluster_Type{Type: discoveryType},
+		CommonLbConfig:       &cluster.Cluster_CommonLbConfig{},
 	}
 
 	// Build default alt stat name - This may be overwritten by the MeshConfig options.
 	c.AltStatName = util.DelimitedStatsPrefix(name)
 
-	if discoveryType != nil {
-		switch *discoveryType {
-		case cluster.Cluster_STRICT_DNS, cluster.Cluster_LOGICAL_DNS:
-			if networkutil.AllIPv4(cb.proxyIPAddresses) {
-				// IPv4 only
+	switch discoveryType {
+	case cluster.Cluster_STRICT_DNS, cluster.Cluster_LOGICAL_DNS:
+		if networkutil.AllIPv4(cb.proxyIPAddresses) {
+			// IPv4 only
+			c.DnsLookupFamily = cluster.Cluster_V4_ONLY
+		} else if networkutil.AllIPv6(cb.proxyIPAddresses) {
+			// IPv6 only
+			c.DnsLookupFamily = cluster.Cluster_V6_ONLY
+			// If we are in this mode, Istio sees ourselves as only have IPv6 addresses, but there is actually a link-local
+			// interface that serves the IPv4. Allow both families.
+			// This ensures we do not break DNS resolution to destinations that are IPv4 only.
+			if features.EnableAdditionalIpv4OutboundListenerForIpv6Only {
+				c.DnsLookupFamily = cluster.Cluster_ALL
+			}
+		} else {
+			// Dual Stack
+			if features.EnableDualStack {
+				// using Cluster_ALL to enable Happy Eyeballsfor upstream connections
+				c.DnsLookupFamily = cluster.Cluster_ALL
+			} else {
+				// keep the original logic if Dual Stack is disable
 				c.DnsLookupFamily = cluster.Cluster_V4_ONLY
-			} else if networkutil.AllIPv6(cb.proxyIPAddresses) {
-				// IPv6 only
-				c.DnsLookupFamily = cluster.Cluster_V6_ONLY
-				// If we are in this mode, Istio sees ourselves as only have IPv6 addresses, but there is actually a link-local
-				// interface that serves the IPv4. Allow both families.
-				// This ensures we do not break DNS resolution to destinations that are IPv4 only.
-				if features.EnableAdditionalIpv4OutboundListenerForIpv6Only {
-					c.DnsLookupFamily = cluster.Cluster_ALL
-				}
-			} else {
-				// Dual Stack
-				if features.EnableDualStack {
-					// using Cluster_ALL to enable Happy Eyeballsfor upstream connections
-					c.DnsLookupFamily = cluster.Cluster_ALL
-				} else {
-					// keep the original logic if Dual Stack is disable
-					c.DnsLookupFamily = cluster.Cluster_V4_ONLY
-				}
 			}
-			dnsResolverConfig, err := anypb.New(&cares.CaresDnsResolverConfig{
-				UdpMaxQueries: wrappers.UInt32(features.PilotDNSCaresUDPMaxQueries),
-			})
-			if err != nil {
-				log.Warnf("Could not create typed_dns_cluster_config for %s: %s. Using default configuration.", name, err)
-			} else {
-				c.TypedDnsResolverConfig = &core.TypedExtensionConfig{
-					Name:        "envoy.network.dns_resolver.cares",
-					TypedConfig: dnsResolverConfig,
-				}
+		}
+		dnsResolverConfig, err := anypb.New(&cares.CaresDnsResolverConfig{
+			UdpMaxQueries: wrappers.UInt32(features.PilotDNSCaresUDPMaxQueries),
+		})
+		if err != nil {
+			log.Warnf("Could not create typed_dns_cluster_config for %s: %s. Using default configuration.", name, err)
+		} else {
+			c.TypedDnsResolverConfig = &core.TypedExtensionConfig{
+				Name:        "envoy.network.dns_resolver.cares",
+				TypedConfig: dnsResolverConfig,
 			}
-			// 0 disables jitter.
-			c.DnsJitter = durationpb.New(features.PilotDNSJitterDurationEnv) //nolint:staticcheck // DnsJitter is deprecated
-			c.DnsRefreshRate = cb.req.Push.Mesh.DnsRefreshRate               //nolint:staticcheck // DnsRefreshRate is deprecated
-			c.RespectDnsTtl = true                                           //nolint:staticcheck // RespectDnsTtl is deprecated
-			// we want to run all the STATIC parts as well to build the load assignment
-			fallthrough
-		case cluster.Cluster_STATIC:
-			if len(localityLbEndpoints) == 0 {
-				log.Debugf("locality endpoints missing for cluster %s", c.Name)
-				cb.req.Push.AddMetric(model.DNSNoEndpointClusters, c.Name, cb.proxyID,
-					fmt.Sprintf("%s cluster without endpoints %s found while pushing CDS", discoveryType.String(), c.Name))
-				return nil
-			}
-			c.LoadAssignment = &endpoint.ClusterLoadAssignment{
-				ClusterName: name,
-				Endpoints:   localityLbEndpoints,
-			}
-		case cluster.Cluster_ORIGINAL_DST:
-			if override, f := service.Attributes.PassthroughTargetPorts[uint32(port.Port)]; f {
-				c.LbConfig = &cluster.Cluster_OriginalDstLbConfig_{
-					OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
-						UpstreamPortOverride: wrappers.UInt32(override),
-					},
-				}
+		}
+		// 0 disables jitter.
+		c.DnsJitter = durationpb.New(features.PilotDNSJitterDurationEnv) //nolint:staticcheck // DnsJitter is deprecated
+		c.DnsRefreshRate = cb.req.Push.Mesh.DnsRefreshRate               //nolint:staticcheck // DnsRefreshRate is deprecated
+		c.RespectDnsTtl = true                                           //nolint:staticcheck // RespectDnsTtl is deprecated
+		// we want to run all the STATIC parts as well to build the load assignment
+		fallthrough
+	case cluster.Cluster_STATIC:
+		if len(localityLbEndpoints) == 0 {
+			log.Debugf("locality endpoints missing for cluster %s", c.Name)
+			cb.req.Push.AddMetric(model.DNSNoEndpointClusters, c.Name, cb.proxyID,
+				fmt.Sprintf("%s cluster without endpoints %s found while pushing CDS", discoveryType.String(), c.Name))
+			return nil
+		}
+		c.LoadAssignment = &endpoint.ClusterLoadAssignment{
+			ClusterName: name,
+			Endpoints:   localityLbEndpoints,
+		}
+	case cluster.Cluster_ORIGINAL_DST:
+		if override, f := service.Attributes.PassthroughTargetPorts[uint32(port.Port)]; f {
+			c.LbConfig = &cluster.Cluster_OriginalDstLbConfig_{
+				OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
+					UpstreamPortOverride: wrappers.UInt32(override),
+				},
 			}
 		}
 	}
@@ -507,6 +484,28 @@ func (cb *ClusterBuilder) buildCluster(name string, discoveryType *cluster.Clust
 	}
 
 	return ec
+}
+
+// buildCluster builds the default cluster and also applies global options.
+// It is used for building both inbound and outbound cluster.
+// TODO(jaellio): Add support for destinationRule configuration
+func (cb *ClusterBuilder) buildDFPCluster(svc *model.Service) *cluster.Cluster {
+	c := &cluster.Cluster{
+		Name:     model.BuildSubsetKey(model.TrafficDirectionInboundVIP, "http", svc.Hostname, svc.Ports[0].Port),
+		LbPolicy: cluster.Cluster_CLUSTER_PROVIDED,
+		ClusterDiscoveryType: &cluster.Cluster_ClusterType{ClusterType: &cluster.Cluster_CustomClusterType{
+			Name: "envoy.clusters.dynamic_forward_proxy",
+			TypedConfig: protoconv.MessageToAny(&dfpcluster.ClusterConfig{
+				ClusterImplementationSpecifier: &dfpcluster.ClusterConfig_DnsCacheConfig{
+					DnsCacheConfig: &dfpcommon.DnsCacheConfig{
+						Name:            model.BuildDNSCacheName(svc.Hostname),
+						DnsLookupFamily: cluster.Cluster_V4_ONLY,
+					},
+				},
+			}),
+		}},
+	}
+	return c
 }
 
 // buildInboundCluster constructs a single inbound cluster. The cluster will be bound to
@@ -530,7 +529,7 @@ func (cb *ClusterBuilder) buildInboundCluster(clusterPort int, bind string,
 		clusterType = cluster.Cluster_STATIC
 	}
 	clusterName := model.BuildInboundSubsetKey(clusterPort)
-	localCluster := cb.buildCluster(clusterName, &clusterType, localityLbEndpoints,
+	localCluster := cb.buildCluster(clusterName, clusterType, localityLbEndpoints,
 		model.TrafficDirectionInbound, instance.Port.ServicePort, instance.Service, inboundServices, "")
 	// If stat name is configured, build the alt statname.
 	if len(cb.req.Push.Mesh.InboundClusterStatName) != 0 {

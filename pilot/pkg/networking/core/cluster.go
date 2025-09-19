@@ -312,7 +312,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 	efKeys := cp.efw.KeysApplyingTo(networking.EnvoyFilter_CLUSTER)
 	hit, miss := 0, 0
 	for _, service := range services {
-		if service.Resolution == model.Alias || service.Hostname.IsWildCarded() {
+		if service.Resolution == model.Alias {
 			continue
 		}
 		for _, port := range service.Ports {
@@ -336,7 +336,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 
 			// create default cluster
 			discoveryType := convertResolution(cb.proxyType, service)
-			defaultCluster := cb.buildCluster(clusterKey.clusterName, &discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil, "")
+			defaultCluster := cb.buildCluster(clusterKey.clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil, "")
 			if defaultCluster == nil {
 				continue
 			}
@@ -444,6 +444,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
 			}
 
 			// create default cluster
+			discoveryType := convertResolution(cb.proxyType, service)
 			clusterName := model.BuildDNSSrvSubsetKey(model.TrafficDirectionOutbound, "",
 				service.Hostname, port.Port)
 
@@ -457,8 +458,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
 				lbEndpoints = endpointBuilder.FromServiceEndpoints()
 			}
 
-			discoveryType := convertResolution(cb.proxyType, service)
-			defaultCluster := cb.buildCluster(clusterName, &discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil, "")
+			defaultCluster := cb.buildCluster(clusterName, discoveryType, lbEndpoints, model.TrafficDirectionOutbound, port, service, nil, "")
 			if defaultCluster == nil {
 				continue
 			}
