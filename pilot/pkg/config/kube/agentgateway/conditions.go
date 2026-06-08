@@ -23,6 +23,7 @@ import (
 	k8salpha "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	"istio.io/istio/pilot/pkg/model/kstatus"
+	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/log"
@@ -95,6 +96,15 @@ func generateSupportedKinds(l k8s.Listener) ([]k8s.RouteGroupKind, bool) {
 			supported = append(supported, toRouteKind(gvk.TCPRoute))
 		}
 		// UDP route not support
+	case k8s.ProtocolType(protocol.HBONE):
+		// HBONE is a tunnel protocol used by waypoint proxies; it can carry any application protocol
+		// TODO(jaellio): verify this is correct
+		supported = []k8s.RouteGroupKind{
+			toRouteKind(gvk.HTTPRoute),
+			toRouteKind(gvk.GRPCRoute),
+			toRouteKind(gvk.TCPRoute),
+			toRouteKind(gvk.TLSRoute),
+		}
 	}
 	if l.AllowedRoutes != nil && len(l.AllowedRoutes.Kinds) > 0 {
 		// We need to filter down to only ones we actually support

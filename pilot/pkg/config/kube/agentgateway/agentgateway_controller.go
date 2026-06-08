@@ -47,6 +47,7 @@ import (
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
+	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
@@ -254,7 +255,8 @@ func (c *Controller) buildResourceCollections(opts krt.OptionsBuilder) {
 		if !builtInClass {
 			return nil
 		}
-		if controller != constants.ManagedAgentgatewayController {
+		// TODO(jaellio): Why is this additional controller check needed?
+		if controller != constants.ManagedAgentgatewayController && controller != constants.ManagedAgentgatewayWaypointController {
 			return nil
 		}
 		agwClass := class.DeepCopy()
@@ -299,8 +301,19 @@ func (c *Controller) buildResourceCollections(opts krt.OptionsBuilder) {
 	// Build agw resources for gateway
 	inferencePolicies := InferencePolicyCollection(c.inputs.InferencePools, c.domainSuffix, opts)
 
+	// Build waypoint service bindings: maps services to their AGW waypoint gateways
+	// if they are defined
+	// TODO(jaellio): Handle Workload <-> Waypoint mapping
+	waypointBindings := BuildWaypointServiceBindings(
+		c.inputs.Services,
+		c.inputs.Namespaces,
+		c.inputs.Gateways,
+		gatewayClasses,
+		opts,
+	)
+
 	// Build ancestor backends (backend→gateway mapping) for BackendTLSPolicy status
-	ancestorBackends := BuildAncestorBackends(c.inputs.HTTPRoutes, c.inputs.GRPCRoutes, opts)
+	ancestorBackends := BuildAncestorBackends(c.inputs.HTTPRoutes, c.inputs.GRPCRoutes, waypointBindings, opts)
 
 	// Build BackendTLS policies
 	backendTLSInputs := BackendTLSPolicyInputs{
@@ -316,7 +329,7 @@ func (c *Controller) buildResourceCollections(opts krt.OptionsBuilder) {
 	backendTLSStatus, backendTLSPolicies := BackendTLSPolicyCollection(backendTLSInputs, opts)
 	status.RegisterStatus(c.status, backendTLSStatus, GetStatus, c.tagWatcher.AccessUnprotected())
 
-	agwResources, routeAttachments := c.buildAgwResources(gateways, referenceGrants, inferencePolicies, backendTLSPolicies, opts)
+	agwResources, routeAttachments := c.buildAgwResources(gateways, referenceGrants, inferencePolicies, backendTLSPolicies, waypointBindings, opts)
 
 	gatewayFinalStatus := c.buildFinalGatewayStatus(gatewayInitialStatus, routeAttachments, opts)
 	status.RegisterStatus(c.status, gatewayFinalStatus, GetStatus, c.tagWatcher.AccessUnprotected())
@@ -340,6 +353,8 @@ func (c *Controller) buildResourceCollections(opts krt.OptionsBuilder) {
 	// TODO(jaellio): Source addresses from the ambientindex so the agentgateway proxies get the same
 	// representation of addresses as ambient proxies (for multicluster)
 	// Build address collections
+	// TODO(jaellio): Scope addresses for waypoint gateways to only fronted + outbound services
+	// (currently all AGW proxies receive all addresses; see Phase 3 in plan)
 	addresses := c.buildAddressCollections(opts)
 
 	// Build XDS collection
@@ -479,6 +494,9 @@ func (c *Controller) buildXDSCollection(
 	agwResourcesByGateway := func(resource AgwResource) types.NamespacedName {
 		return resource.Gateway
 	}
+	// TODO(jaellio): For waypoints we want to filter addresses to only fronted + outbound services.
+	// Address scoping is deferred to a follow-up (see Phase 3 in plan). Currently all AGW proxies
+	// receive all addresses, which is functionally correct but not optimally scoped.
 	c.Registrations = append(c.Registrations, xds.Collection[Address, *workloadapi.Address](xdsAddresses, opts),
 		xds.PerGatewayCollection[AgwResource, *api.Resource](agwResources, agwResourcesByGateway, opts))
 }
@@ -627,6 +645,7 @@ func (c *Controller) buildAgwResources(
 	refGrants gatewaycommon.ReferenceGrants,
 	inferencePolicies krt.Collection[AgwResource],
 	backendTLSPolicies krt.Collection[AgwResource],
+	waypointBindings krt.Collection[WaypointServiceBinding],
 	opts krt.OptionsBuilder,
 ) (
 	krt.Collection[AgwResource],
@@ -641,19 +660,25 @@ func (c *Controller) buildAgwResources(
 		port, _ := strconv.Atoi(object.Key)
 		uniq := sets.New[types.NamespacedName]()
 		protocol := api.Bind_Protocol(0)
+		var tunnelProtocol = api.Bind_DIRECT
 		for _, gw := range object.Objects {
 			uniq.Insert(gw.ParentGateway)
 			// TODO: better handle conflicts of protocols. For now, we arbitrarily treat TLS > plain
+			// TODO(jaellio): handle conflict
 			if gw.Valid {
 				protocol = max(protocol, c.getBindProtocol(gw))
+				if tp := c.getTunnelProtocol(gw); tp != api.Bind_DIRECT {
+					tunnelProtocol = tp
+				}
 			}
 		}
 		return slices.Map(uniq.UnsortedList(), func(e types.NamespacedName) AgwResource {
 			bind := AgwBind{
 				&api.Bind{
-					Key:      object.Key + "/" + e.String(),
-					Port:     uint32(port), //nolint:gosec // G115: port is always in valid port range
-					Protocol: protocol,
+					Key:            object.Key + "/" + e.String(),
+					Port:           uint32(port), //nolint:gosec // G115: port is always in valid port range
+					Protocol:       protocol,
+					TunnelProtocol: tunnelProtocol,
 				},
 			}
 			return ToResourceForGateway(e, bind)
@@ -666,11 +691,14 @@ func (c *Controller) buildAgwResources(
 	}, opts.WithName("Listeners")...)
 
 	// Build routes
-	routeParents := BuildRouteParents(gateways)
+	// TODO(jaellio): Why are we including waypoint bindings here?
+	routeParents := BuildRouteParents(gateways, waypointBindings)
 
 	routeInputs := RouteContextInputs{
 		Grants:         refGrants,
 		RouteParents:   routeParents,
+		// TODO(jaellio): This can't be hardcoded anymore since we have multiple controllers (waypoint
+		// and regular gateways)
 		ControllerName: constants.ManagedAgentgatewayController,
 		DomainSuffix:   c.domainSuffix,
 		Services:       c.inputs.Services,
@@ -775,6 +803,8 @@ func (c *Controller) getProtocolAndTLSConfig(obj *GatewayListener) (api.Protocol
 		return api.Protocol_TLS, tlsConfig, true
 	case gatewayv1.TCPProtocolType:
 		return api.Protocol_TCP, nil, true
+	case gatewayv1.ProtocolType(protocol.HBONE):
+		return api.Protocol_HBONE, nil, true
 	default:
 		return api.Protocol_HTTP, nil, false // Unsupported protocol
 	}
@@ -791,7 +821,29 @@ func (c *Controller) getBindProtocol(obj *GatewayListener) api.Bind_Protocol {
 		return api.Bind_TLS
 	case gatewayv1.TCPProtocolType:
 		return api.Bind_TCP
+	case gatewayv1.ProtocolType(protocol.HBONE):
+		// The bind protocol is not used for HBONE_GATEWAY in the data plane;
+		// the actual inner protocol is determined at runtime from the other
+		// listeners on the same port. Return HTTP as a placeholder.
+		return api.Bind_HTTP
 	default:
 		return api.Bind_HTTP
+	}
+}
+
+// getTunnelProtocol maps a Gateway listener protocol to its tunnel protocol.
+// HBONE listeners use HBONE_GATEWAY mode when agw is a gateway: the proxy terminates inbound HBONE
+// and routes CONNECT requests to local binds.
+// HBONE listeners use HBONE_WAYPOINT mode when agw is a waypoint: the proxy terminates inbound HBONE
+// and routes CONNECT requests to the waypoint.
+func (c *Controller) getTunnelProtocol(obj *GatewayListener) api.Bind_TunnelProtocol {
+	switch obj.ParentInfo.Protocol {
+	case gatewayv1.ProtocolType(protocol.HBONE):
+		if obj.ParentInfo.IsWaypoint() {
+			return api.Bind_HBONE_WAYPOINT
+		}
+		return api.Bind_HBONE_GATEWAY
+	default:
+		return api.Bind_DIRECT
 	}
 }

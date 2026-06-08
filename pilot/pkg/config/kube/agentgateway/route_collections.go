@@ -94,6 +94,8 @@ func (r RouteAttachment) Equals(other RouteAttachment) bool {
 
 // gatewayRouteAttachmentCountCollection holds the generic logic to determine the parents a route is attached to, used for
 // computing the aggregated `attachedRoutes` status in Gateway.
+// TODO(jaellio): update to support attachment to services and mapping from gateways (that are waypoints) to
+// routes belonging to services from by the respective gateways/waypoints
 func gatewayRouteAttachmentCountCollection[T controllers.Object](
 	inputs RouteContextInputs,
 	col krt.Collection[T],
@@ -218,7 +220,10 @@ func AgwRouteCollection(
 
 	// Join all the route types into a single collection
 	routes := krt.JoinCollection([]krt.Collection[AgwResource]{httpRoutes, grpcRoutes, tcpRoutes, tlsRoutes}, krtopts.WithName("ADPRoutes")...)
-
+	// TODO(jaellio): Up until this point, we have just found and translated all of the routes - need to verify this included routes
+	// attached to services at their parents.
+	// This is where the actual gateway mapping happens I think. For gateways that are waypoints, I need this to
+	// also include the waypoint bindings/routes belonging to services using those gateways(waypoints)
 	routeAttachments := krt.JoinCollection([]krt.Collection[*RouteAttachment]{
 		gatewayRouteAttachmentCountCollection(inputs, httpRouteCol, gvk.HTTPRoute, krtopts),
 		gatewayRouteAttachmentCountCollection(inputs, grpcRouteCol, gvk.GRPCRoute, krtopts),
