@@ -176,9 +176,10 @@ const (
 	ManagedAgentgatewayWaypointController      = "istio.io/agentgateway-waypoint-controller"
 	ManagedAgentgatewayWaypointControllerLabel = "istio.io-agentgateway-waypoint-controller"
 	// ManagedAgentgatewayRemoteWaypointController is the controller for the remote-controlled
-	// agentgateway waypoint class. istiod observes these Gateways (deploys the pod and issues a
-	// SPIFFE identity via the waypoint template) but does NOT generate agentgateway xDS Resources
-	// (binds, listeners, routes) for them; the agentgateway control plane is the sole config source.
+	// agentgateway waypoint class. istiod only observes these Gateways so it can treat the proxy as
+	// a Waypoint member and issue it a SPIFFE identity. istiod does NOT deploy the pod and does NOT
+	// generate agentgateway xDS Resources (binds, listeners, routes) for it; the standalone
+	// agentgateway control plane deploys the pod AND is the sole source of its xDS config.
 	ManagedAgentgatewayRemoteWaypointController      = "istio.io/agentgateway-remote-waypoint-controller"
 	ManagedAgentgatewayRemoteWaypointControllerLabel = "istio.io-agentgateway-remote-waypoint-controller"
 	ManagedGatewayEastWestController                 = "istio.io/eastwest-controller"
@@ -193,8 +194,9 @@ const (
 	AgentgatewayClassName               = "istio-agentgateway"
 	AgentgatewayWaypointClassName       = "istio-agentgateway-waypoint"
 	// AgentgatewayRemoteWaypointClassName is the GatewayClass for an agentgateway waypoint that is
-	// observed by istiod (deployed + issued a SPIFFE identity) but configured entirely by the
-	// agentgateway control plane rather than istiod xDS. Used for the agentgateway-as-remote-waypoint POC.
+	// deployed and configured entirely by the standalone agentgateway control plane. istiod only
+	// observes the resulting Gateway to treat it as a Waypoint member and issue a SPIFFE identity;
+	// it neither deploys the pod nor generates its xDS. Used for the agentgateway-as-remote-waypoint POC.
 	AgentgatewayRemoteWaypointClassName = "agentgateway-remote-waypoint"
 	EastWestGatewayClassName            = "istio-east-west"
 
