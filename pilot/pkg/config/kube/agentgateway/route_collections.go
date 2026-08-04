@@ -39,6 +39,7 @@ import (
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/protomarshal"
 	"istio.io/istio/pkg/util/sets"
+	"istio.io/istio/pkg/workloadapi"
 )
 
 // RouteContext defines a common set of inputs to a route collection. This should be built once per route translation and
@@ -256,15 +257,42 @@ func createRouteCollection[T controllers.Object, ST any](
 			inner := protomarshal.ShallowClone(e.Route)
 			_, name, _ := strings.Cut(parent.InternalName, "/")
 			inner.ListenerKey = name
-			if sec := string(parent.ParentSection); sec != "" {
-				inner.Key = inner.GetKey() + "." + sec
-			} else {
-				inner.Key = inner.GetKey()
+			var serviceKey *workloadapi.NamespacedHostname
+			if parent.ServiceKey != nil {
+				serviceKey = &workloadapi.NamespacedHostname{
+					Namespace: parent.ServiceKey.Namespace,
+					Hostname:  parent.ServiceKey.Name,
+				}
+			}
+			inner.ServiceKey = serviceKey
+			inner.Key += routeKeySuffix(parent)
+			if inner.ServiceKey != nil {
+				// if linked by Service, no need for hostname matching
+				inner.Hostnames = nil
+				inner.ServicePort = uint32(parent.Port) //nolint:gosec // G115: Gateway API PortNumber is int32 with validation 1-65535, always safe
 			}
 			return ToAgwResource(AgwRoute{Route: inner})
 		},
 		buildStatus,
 	)
+}
+
+func routeKeySuffix(parent RouteParentReference) string {
+	if parent.ServiceKey != nil {
+		suffix := ".svc." + parent.ServiceKey.Namespace + "." + parent.ServiceKey.Name
+		if parent.Port != 0 {
+			suffix += fmt.Sprintf(".%d", parent.Port)
+		}
+		return suffix
+	}
+	section := string(parent.ParentSection)
+	if section == "" {
+		return ""
+	}
+	if parent.ParentKey.Kind != gvk.Gateway.Kubernetes() {
+		return "." + parent.ParentKey.Namespace + "." + parent.ParentKey.Name + "." + section
+	}
+	return "." + section
 }
 
 // IsNil works around comparing generic types

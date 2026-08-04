@@ -1,0 +1,20 @@
+# GatewayClass for the remote-controlled waypoint.
+#
+# This class is owned by the agentgateway controller (controllerName
+# agentgateway.dev/agentgateway), NOT by istiod. istiod only OBSERVES gateways
+# of this class (to issue SPIFFE identity for the waypoint pod); it does not
+# push xDS to them. The agentgateway control plane is what actually programs
+# the waypoint dataplane.
+#
+# The class name `agentgateway-remote-waypoint` is special-cased in the istio
+# branch (jaellio/pocindagwwaypoint): istiod recognizes it as a waypoint it
+# should issue identity for, and its create-only GatewayClass controller skips
+# reconciling it so the manually-created object (with the agentgateway
+# controllerName) is preserved.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: agentgateway-remote-waypoint
+spec:
+  controllerName: agentgateway.dev/agentgateway
+  description: Agentgateway remote-controlled waypoint

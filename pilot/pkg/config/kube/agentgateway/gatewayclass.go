@@ -23,6 +23,7 @@ import (
 
 	"istio.io/istio/pilot/pkg/config/kube/gatewaycommon"
 	"istio.io/istio/pilot/pkg/model/kstatus"
+	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
@@ -93,6 +94,14 @@ func (c *ClassController) Reconcile(types.NamespacedName) error {
 }
 
 func (c *ClassController) reconcileClass(class k8sv1.ObjectName) error {
+	// The remote-controlled agentgateway waypoint class is created and owned by the
+	// agentgateway control plane (its controllerName points at agentgateway, not istiod).
+	// istiod only observes Gateways of this class to issue identity; it must not create
+	// or reclaim the GatewayClass, otherwise it would stamp its own controllerName.
+	if string(class) == constants.AgentgatewayRemoteWaypointClassName {
+		log.Debugf("GatewayClass/%v is remote-controlled, skipping creation", class)
+		return nil
+	}
 	if c.classes.Get(string(class), "") != nil {
 		log.Debugf("GatewayClass/%v already exists, no action", class)
 		return nil

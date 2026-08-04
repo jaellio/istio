@@ -175,18 +175,28 @@ const (
 	ManagedAgentgatewayController              = "istio.io/agentgateway-controller"
 	ManagedAgentgatewayWaypointController      = "istio.io/agentgateway-waypoint-controller"
 	ManagedAgentgatewayWaypointControllerLabel = "istio.io-agentgateway-waypoint-controller"
-	ManagedGatewayEastWestController           = "istio.io/eastwest-controller"
+	// ManagedAgentgatewayRemoteWaypointController is the controller for the remote-controlled
+	// agentgateway waypoint class. istiod observes these Gateways (deploys the pod and issues a
+	// SPIFFE identity via the waypoint template) but does NOT generate agentgateway xDS Resources
+	// (binds, listeners, routes) for them; the agentgateway control plane is the sole config source.
+	ManagedAgentgatewayRemoteWaypointController      = "istio.io/agentgateway-remote-waypoint-controller"
+	ManagedAgentgatewayRemoteWaypointControllerLabel = "istio.io-agentgateway-remote-waypoint-controller"
+	ManagedGatewayEastWestController                 = "istio.io/eastwest-controller"
 	ManagedGatewayEastWestControllerLabel      = "istio.io-eastwest-controller"
 
 	// WaypointSandwichListenerProxyProtocol defines the protocol which is defined on the listener used by a waypoint sandwich
 	// This listener should align to the proto/port defined by the  "ambient.istio.io/waypoint-inbound-binding" annotation
 	WaypointSandwichListenerProxyProtocol = "istio.io/PROXY"
 
-	RemoteGatewayClassName        = "istio-remote"
-	WaypointGatewayClassName      = "istio-waypoint"
-	AgentgatewayClassName         = "istio-agentgateway"
-	AgentgatewayWaypointClassName = "istio-agentgateway-waypoint"
-	EastWestGatewayClassName      = "istio-east-west"
+	RemoteGatewayClassName              = "istio-remote"
+	WaypointGatewayClassName            = "istio-waypoint"
+	AgentgatewayClassName               = "istio-agentgateway"
+	AgentgatewayWaypointClassName       = "istio-agentgateway-waypoint"
+	// AgentgatewayRemoteWaypointClassName is the GatewayClass for an agentgateway waypoint that is
+	// observed by istiod (deployed + issued a SPIFFE identity) but configured entirely by the
+	// agentgateway control plane rather than istiod xDS. Used for the agentgateway-as-remote-waypoint POC.
+	AgentgatewayRemoteWaypointClassName = "agentgateway-remote-waypoint"
+	EastWestGatewayClassName            = "istio-east-west"
 
 	// TODO formalize this API
 	// TODO additional values to represent passthrough and hbone or both

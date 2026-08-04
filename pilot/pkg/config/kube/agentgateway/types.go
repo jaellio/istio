@@ -65,6 +65,8 @@ type AgwParentInfo struct {
 	ParentGateway types.NamespacedName
 	// +krtEqualsTodo ensure gateway class changes trigger equality differences
 	ParentGatewayClassName string
+	// ServiceKey (optionally) links a parent reference to an individual Service.
+	ServiceKey *types.NamespacedName
 	// InternalName refers to the internal name we can reference it by. For example "my-ns/my-gateway"
 	InternalName string
 	// AllowedKinds indicates which kinds can be admitted by this Parent
@@ -79,6 +81,10 @@ type AgwParentInfo struct {
 	Port           gatewayv1.PortNumber
 	Protocol       gatewayv1.ProtocolType
 	TLSPassthrough bool
+	// RemoteControlled indicates the parent Gateway is configured by an external control plane
+	// (e.g. the agentgateway control plane), so istiod must not generate xDS Resources for it.
+	// The Gateway is still observed (Waypoint membership, identity) as normal.
+	RemoteControlled bool
 }
 
 // ConfigErrorReason represents a reason for a configuration error.

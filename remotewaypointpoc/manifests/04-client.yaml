@@ -1,0 +1,24 @@
+# Meshed client used to generate traffic through the waypoint.
+#
+# It's an ambient-captured pod (in the `agents` namespace) with curl. When it
+# calls a Service labeled istio.io/use-waypoint: agents-waypoint, ztunnel
+# transparently redirects the connection through the waypoint over HBONE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-client
+  namespace: agents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mesh-client
+  template:
+    metadata:
+      labels:
+        app: mesh-client
+    spec:
+      containers:
+      - name: client
+        image: curlimages/curl
+        command: ["/bin/sh", "-c", "sleep infinity"]

@@ -90,6 +90,7 @@ func GetAgentGatewayClasses() map[gateway.ObjectName]gateway.GatewayController {
 		res[constants.AgentgatewayClassName] = constants.ManagedAgentgatewayController
 		if features.EnableAmbientWaypoints {
 			res[constants.AgentgatewayWaypointClassName] = constants.ManagedAgentgatewayWaypointController
+			res[constants.AgentgatewayRemoteWaypointClassName] = constants.ManagedAgentgatewayRemoteWaypointController
 		}
 	}
 	return res
@@ -171,6 +172,18 @@ func GetClassInfos() map[gateway.GatewayController]ClassInfo {
 				DefaultServiceType:  corev1.ServiceTypeClusterIP,
 				AddressType:         "",
 				ControllerLabel:     constants.ManagedAgentgatewayWaypointControllerLabel,
+				SupportsListenerSet: false,
+			}
+			// Remote-controlled agentgateway waypoint: istiod deploys the pod and issues identity
+			// (same waypoint template) but does not generate xDS Resources for it.
+			m[constants.ManagedAgentgatewayRemoteWaypointController] = ClassInfo{
+				Controller:          constants.ManagedAgentgatewayRemoteWaypointController,
+				Description:         "Istio with Agentgateway Waypoint (remote-controlled)",
+				Templates:           "agentgateway-waypoint",
+				DisableNameSuffix:   true,
+				DefaultServiceType:  corev1.ServiceTypeClusterIP,
+				AddressType:         "",
+				ControllerLabel:     constants.ManagedAgentgatewayRemoteWaypointControllerLabel,
 				SupportsListenerSet: false,
 			}
 		}

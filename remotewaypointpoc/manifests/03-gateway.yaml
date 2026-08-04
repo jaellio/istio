@@ -1,0 +1,33 @@
+# The waypoint Gateway.
+#
+# - gatewayClassName references the remote-waypoint class, so the agentgateway
+#   controller deploys and programs the proxy while istiod only issues identity.
+# - label istio.io/waypoint-for: service marks this as a service-scoped waypoint
+#   (services in this namespace labeled istio.io/use-waypoint: agents-waypoint
+#   are fronted by it).
+# - single HBONE listener on 15008: the waypoint terminates inbound HBONE mTLS
+#   tunnels from ztunnel. Because this is a remote-waypoint class, the
+#   agentgateway control plane programs the bind with tunnelProtocol
+#   HBONE_WAYPOINT (self-terminating, preserves original destination) rather
+#   than HBONE_GATEWAY.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agents-waypoint
+  namespace: agents
+  labels:
+    istio.io/waypoint-for: service
+spec:
+  gatewayClassName: agentgateway-remote-waypoint
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: remote-waypoint-params
+  listeners:
+  - name: mesh
+    port: 15008
+    protocol: HBONE
+    allowedRoutes:
+      namespaces:
+        from: Same

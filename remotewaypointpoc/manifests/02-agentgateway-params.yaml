@@ -1,0 +1,36 @@
+# AgentgatewayParameters for the waypoint deployment.
+#
+# Attached to the Gateway via spec.infrastructure.parametersRef. Tells the
+# agentgateway deployer how to configure the waypoint proxy pod.
+#
+# spec.istio:
+#   The waypoint gets its SPIFFE identity from istiod's CA. `caAddress` points
+#   the proxy's caclient at istiod so it can fetch a workload certificate
+#   (spiffe://cluster.local/ns/agents/sa/agents-waypoint). This is the ONLY
+#   thing istiod does for the waypoint — issue identity. All dataplane config
+#   comes from the agentgateway control plane.
+#
+# spec.deployment ... securityContext {$patch: delete}:
+#   The dev/Tilt agentgateway image uses a start.sh wrapper that writes to the
+#   container filesystem, which conflicts with the deployer's default
+#   readOnlyRootFilesystem: true. Deleting the container securityContext lets
+#   the dev image run (matches how the upstream Tiltfile handles it). Remove
+#   this block when using a production (read-only-rootfs-safe) image.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: remote-waypoint-params
+  namespace: agents
+spec:
+  istio:
+    enabled: true
+    caAddress: https://istiod.istio-system.svc:15012
+    trustDomain: cluster.local
+  deployment:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: agentgateway
+            securityContext:
+              $patch: delete
