@@ -1,0 +1,49 @@
+# =============================================================================
+# OPTIONAL (mock): off-cluster LLM via httpbun — no API key required
+# =============================================================================
+#
+# Validates the "waypoint fronts an off-cluster service" path live, with no key
+# and no extra plumbing. It uses the public httpbun OpenAI-compatible mock
+# (https://httpbun.com/llm/chat/completions), which answers over plain HTTP.
+#
+#   client ──HTTP──► ztunnel ──HBONE──► agents-waypoint ──HTTP──► httpbun.com:80
+#                                                                 /llm/chat/completions
+#
+# A single ServiceEntry is all that is required: labelling it with
+# istio.io/use-waypoint makes ztunnel redirect egress to httpbun.com through the
+# waypoint, which transparently forwards to the original destination. No
+# HTTPRoute / AgentgatewayBackend is involved — this is pure transparent
+# forwarding, the same mechanism the in-cluster backends use.
+#
+# Prerequisite: kind node egress to the public internet.
+#
+# Deploy:  kubectl apply -f optional/external-llm-httpbun-mock.yaml
+# Test:    kubectl exec -n agents deploy/mesh-client -- \
+#            curl -s -m 20 -w '\nHTTP %{http_code}\n' \
+#            http://httpbun.com/llm/chat/completions \
+#            -H 'Content-Type: application/json' \
+#            -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
+#
+# NOTE: This mock does NOT exercise credential injection or provider TLS
+# origination. Those require an HTTPRoute -> AgentgatewayBackend, which is not
+# yet wired for remote waypoints on this branch (see README "External LLM").
+# -----------------------------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: httpbun-mock
+  namespace: agents
+  labels:
+    # Front this off-cluster host with the waypoint.
+    istio.io/use-waypoint: agents-waypoint
+spec:
+  hosts:
+  - httpbun.com
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+  # httpbun answers the OpenAI-compatible mock over plain HTTP on :80.
+  - name: http
+    number: 80
+    protocol: HTTP

@@ -254,7 +254,9 @@ func (c *Controller) buildResourceCollections(opts krt.OptionsBuilder) {
 		if !builtInClass {
 			return nil
 		}
-		if controller != constants.ManagedAgentgatewayController && controller != constants.ManagedAgentgatewayWaypointController {
+		if controller != constants.ManagedAgentgatewayController &&
+			controller != constants.ManagedAgentgatewayWaypointController &&
+			controller != constants.ManagedAgentgatewayRemoteWaypointController {
 			return nil
 		}
 		agwClass := class.DeepCopy()
@@ -726,6 +728,16 @@ func (c *Controller) buildAgwResources(
 	krt.Collection[AgwResource],
 	krt.Collection[*RouteAttachment],
 ) {
+	// Gateways marked as externally managed (e.g. agentgateway-as-remote-waypoint) are observed by
+	// istiod for status/identity/Waypoint membership, but their xDS Resources (binds, listeners,
+	// routes) are owned by an external control plane. Filter them out so istiod does not configure them.
+	gateways = krt.NewCollection(gateways, func(ctx krt.HandlerContext, l *GatewayListener) **GatewayListener {
+		if l.ParentInfo.RemoteControlled {
+			return nil
+		}
+		return &l
+	}, opts.WithName("ConfiguredGateways")...)
+
 	// Build binds
 	gatewayParents := krt.UnnamedIndex(gateways, func(l *GatewayListener) []string {
 		return []string{l.ParentInfo.ParentGateway.String()}

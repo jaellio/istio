@@ -34,8 +34,12 @@ import (
 
 // RouteParentReference holds information about a route's parent reference
 type RouteParentReference struct {
+	// Optionally links a parent reference to a service
+	ServiceKey *types.NamespacedName
 	// InternalName refers to the internal name of the parent we can reference it by. For example "my-ns/my-gateway"
 	InternalName string
+	// Port is the parentRef port, scoping the route to one port. Zero means any port.
+	Port gatewayv1.PortNumber
 	// InternalKind is the Group/Kind of the Parent
 	InternalKind schema.GroupVersionKind
 	// DeniedReason, if present, indicates why the reference was not valid
@@ -239,6 +243,8 @@ func extractParentReferenceInfo(ctx RouteContext, parents RouteParents, obj cont
 
 			rpi := RouteParentReference{
 				ParentGateway:          pr.ParentGateway,
+				ServiceKey:             pr.ServiceKey,
+				Port:                   pr.Port,
 				InternalName:           pr.InternalName,
 				InternalKind:           ir.Kind,
 				Hostname:               pr.OriginalHostname,

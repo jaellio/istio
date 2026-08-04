@@ -90,6 +90,7 @@ func GetAgentGatewayClasses() map[gateway.ObjectName]gateway.GatewayController {
 		res[constants.AgentgatewayClassName] = constants.ManagedAgentgatewayController
 		if features.EnableAmbientWaypoints {
 			res[constants.AgentgatewayWaypointClassName] = constants.ManagedAgentgatewayWaypointController
+			res[constants.AgentgatewayRemoteWaypointClassName] = constants.ManagedAgentgatewayRemoteWaypointController
 		}
 	}
 	return res
@@ -171,6 +172,22 @@ func GetClassInfos() map[gateway.GatewayController]ClassInfo {
 				DefaultServiceType:  corev1.ServiceTypeClusterIP,
 				AddressType:         "",
 				ControllerLabel:     constants.ManagedAgentgatewayWaypointControllerLabel,
+				SupportsListenerSet: false,
+			}
+			// Remote-controlled agentgateway waypoint: the standalone agentgateway control plane
+			// deploys the pod and owns its xDS config. istiod only observes the Gateway (to treat it
+			// as a Waypoint member and issue a SPIFFE identity). This ClassInfo is required so the
+			// observe path in GatewayCollection recognizes the class; its deployer fields (Templates,
+			// DefaultServiceType) are unused here because the deployer is gated on the real
+			// GatewayClass's foreign controllerName and skips this class.
+			m[constants.ManagedAgentgatewayRemoteWaypointController] = ClassInfo{
+				Controller:          constants.ManagedAgentgatewayRemoteWaypointController,
+				Description:         "Istio with Agentgateway Waypoint (remote-controlled)",
+				Templates:           "agentgateway-waypoint",
+				DisableNameSuffix:   true,
+				DefaultServiceType:  corev1.ServiceTypeClusterIP,
+				AddressType:         "",
+				ControllerLabel:     constants.ManagedAgentgatewayRemoteWaypointControllerLabel,
 				SupportsListenerSet: false,
 			}
 		}

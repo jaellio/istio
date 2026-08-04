@@ -1,0 +1,11 @@
+# Namespace for the remote-waypoint POC.
+#
+# The `istio.io/dataplane-mode: ambient` label enrolls all pods in this
+# namespace into the ambient mesh, so ztunnel captures their traffic and
+# (for services labeled use-waypoint) redirects it through the waypoint.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+  labels:
+    istio.io/dataplane-mode: ambient

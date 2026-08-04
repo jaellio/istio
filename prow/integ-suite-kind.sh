@@ -144,8 +144,9 @@ export HUB=${HUB:-"testing"}
 export TAG="${TAG:-"istio-testing"}"
 export VARIANT
 
-# If we're not intending to pull from an actual remote registry, use the local kind registry
-if [[ -z "${SKIP_BUILD:-}" ]]; then
+# If we're not intending to pull from an actual remote registry, use the local kind registry.
+# Honor an explicitly provided HUB (e.g. a ctlptl-managed registry) so it is not overwritten.
+if [[ -z "${SKIP_BUILD:-}" && -z "${HUB_OVERRIDE:-}" ]]; then
   HUB="${KIND_REGISTRY}"
   export HUB
 fi

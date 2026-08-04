@@ -37,6 +37,7 @@ import (
 	"istio.io/istio/pkg/revisions"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/util/sets"
+	"istio.io/istio/pkg/workloadapi"
 )
 
 // Used by agentgateway controller
@@ -127,6 +128,8 @@ func (g AgwParentInfo) Equals(other AgwParentInfo) bool {
 		g.Port == other.Port &&
 		g.Protocol == other.Protocol &&
 		g.TLSPassthrough == other.TLSPassthrough &&
+		g.RemoteControlled == other.RemoteControlled &&
+		ptr.Equal(g.ServiceKey, other.ServiceKey) &&
 		slices.EqualFunc(g.AllowedKinds, other.AllowedKinds, func(a, b gatewayv1.RouteGroupKind) bool {
 			return a.Kind == b.Kind && ptr.Equal(a.Group, b.Group)
 		}) &&
@@ -134,7 +137,8 @@ func (g AgwParentInfo) Equals(other AgwParentInfo) bool {
 }
 
 func (g AgwParentInfo) IsWaypoint() bool {
-	return g.ParentGatewayClassName == constants.AgentgatewayWaypointClassName
+	return g.ParentGatewayClassName == constants.AgentgatewayWaypointClassName ||
+		g.ParentGatewayClassName == constants.AgentgatewayRemoteWaypointClassName
 }
 
 // Borrowed from kgateway
@@ -497,6 +501,7 @@ func GatewayCollection(
 				Port:                   l.Port,
 				Protocol:               l.Protocol,
 				TLSPassthrough:         l.TLS != nil && l.TLS.Mode != nil && *l.TLS.Mode == gatewayv1.TLSModePassthrough,
+				RemoteControlled:       string(obj.Spec.GatewayClassName) == constants.AgentgatewayRemoteWaypointClassName,
 			}
 
 			res := &GatewayListener{
@@ -568,7 +573,8 @@ type RouteParents struct {
 }
 
 func (p RouteParents) fetch(ctx krt.HandlerContext, pk AgwParentKey) []*AgwParentInfo {
-	// TODO(jaellio): support ServiceEntry for fetchServiceParent
+	// If the parent is a Service, we need to resolve it to the waypoint gateway that fronts it if it
+	// exists. Otherwise, we can fetch the parent directly from the gateway index.
 	if pk.Kind == gvk.Service.Kubernetes() {
 		return p.fetchServiceParent(ctx, pk)
 	}
@@ -599,7 +605,14 @@ func (p RouteParents) fetchServiceParent(ctx krt.HandlerContext, pk AgwParentKey
 		Namespace: binding.WaypointGateway.Namespace,
 	}
 	return slices.Map(p.gatewayIndex.Fetch(ctx, wpKey), func(gw *GatewayListener) *AgwParentInfo {
-		return &gw.ParentInfo
+		pi := gw.ParentInfo
+		if gw.ParentInfo.IsWaypoint() {
+			pi.ServiceKey = &types.NamespacedName{
+				Namespace: pk.Namespace,
+				Name:      pk.Name,
+			}
+		}
+		return &pi
 	})
 }
 
