@@ -57,6 +57,12 @@ type Index interface {
 	AllLocalNetworkGlobalServices(key model.WaypointKey) []model.ServiceInfo
 	WorkloadsForWaypoint(key model.WaypointKey) []model.WorkloadInfo
 	ServicesForWaypoint(key model.WaypointKey) []model.ServiceInfo
+	// Services, Workloads, and Waypoints expose the underlying krt collections for controllers that
+	// want to consume the ambient view reactively rather than through the point-in-time lookup APIs
+	// above.
+	Services() krt.Collection[model.ServiceInfo]
+	Workloads() krt.Collection[model.WorkloadInfo]
+	Waypoints() krt.Collection[Waypoint]
 	Run(stop <-chan struct{})
 	HasSynced() bool
 	model.AmbientIndexes
@@ -252,6 +258,7 @@ func New(options Options) Index {
 		Waypoints,
 		opts,
 	)
+	authPoliciesByNs := selectingWorkloadAuthzByNs(AuthorizationPolicies)
 	serviceEntryVisibility := model.ServiceEntryVisibilityCollection(a.meshConfig.AsCollection(), opts)
 
 	// these are workloadapi-style services combined from kube services and service entries
@@ -337,12 +344,13 @@ func New(options Options) Index {
 	}, opts.WithName("NamespacesInfo")...)
 
 	NodeLocality := NodesCollection(Nodes, opts.WithName("NodeLocality")...)
+	PeerAuthsByNs := krt.NewNamespaceIndex(PeerAuths)
 	Workloads := builder.WorkloadsCollection(
 		Pods,
 		NodeLocality,
 		a.meshConfig,
-		AuthorizationPolicies,
-		PeerAuths,
+		authPoliciesByNs,
+		PeerAuthsByNs,
 		Waypoints,
 		WorkloadServices,
 		WorkloadEntries,
@@ -588,13 +596,15 @@ func (a *index) inRevision(obj any) bool {
 
 // All return all known workloads and services. Result is un-ordered
 func (a *index) All() []model.AddressInfo {
+	allWl := a.workloads.List()
+	allSvc := a.services.List()
 	// Add all workloads
-	res := make([]model.AddressInfo, 0, len(a.workloads.List())+len(a.services.List()))
-	for _, wl := range a.workloads.List() {
+	res := make([]model.AddressInfo, 0, len(allWl)+len(allSvc))
+	for _, wl := range allWl {
 		res = append(res, wl.AsAddress)
 	}
 	// Add all services
-	for _, s := range a.services.List() {
+	for _, s := range allSvc {
 		res = append(res, s.AsAddress)
 	}
 	return res
@@ -665,8 +675,11 @@ func (a *index) AddressInformation(addresses sets.String) ([]model.AddressInfo, 
 	return res, sets.New(removed...)
 }
 
-// serviceOwningWaypoints returns the complete waypoint set fronting this service.
-func serviceOwningWaypoints(s model.ServiceInfo) []*workloadapi.GatewayAddress {
+// ServiceOwningWaypoints returns the complete waypoint set fronting this service — the primary
+// waypoint address, or every WeightedWaypoint destination when canary routing is set. Exported so
+// controllers that need to resolve waypoint addresses back to k8s Gateway identities can iterate
+// them without re-implementing the "weighted overrides primary" rule.
+func ServiceOwningWaypoints(s model.ServiceInfo) []*workloadapi.GatewayAddress {
 	if s.Service == nil {
 		return nil
 	}
@@ -685,10 +698,10 @@ func serviceOwningWaypoints(s model.ServiceInfo) []*workloadapi.GatewayAddress {
 	return []*workloadapi.GatewayAddress{s.Service.Waypoint}
 }
 
-// serviceOwningWaypointHostnames adapts serviceOwningWaypoints for hostname indexes.
+// serviceOwningWaypointHostnames adapts ServiceOwningWaypoints for hostname indexes.
 func serviceOwningWaypointHostnames(s model.ServiceInfo) []NamespaceHostname {
 	var out []NamespaceHostname
-	for _, waypoint := range serviceOwningWaypoints(s) {
+	for _, waypoint := range ServiceOwningWaypoints(s) {
 		wa := waypoint.GetHostname()
 		if wa == nil {
 			continue
@@ -701,7 +714,7 @@ func serviceOwningWaypointHostnames(s model.ServiceInfo) []NamespaceHostname {
 // serviceOwningWaypointAddresses adapts serviceOwningWaypoints for IP indexes.
 func serviceOwningWaypointAddresses(s model.ServiceInfo) []networkAddress {
 	var out []networkAddress
-	for _, waypoint := range serviceOwningWaypoints(s) {
+	for _, waypoint := range ServiceOwningWaypoints(s) {
 		wa := waypoint.GetAddress()
 		if wa == nil {
 			continue
@@ -785,6 +798,18 @@ func (a *index) ServiceInfo(key string) *model.ServiceInfo {
 		return svc
 	}
 	return nil
+}
+
+func (a *index) Services() krt.Collection[model.ServiceInfo] {
+	return a.services.Collection
+}
+
+func (a *index) Workloads() krt.Collection[model.WorkloadInfo] {
+	return a.workloads.Collection
+}
+
+func (a *index) Waypoints() krt.Collection[Waypoint] {
+	return a.waypoints.Collection
 }
 
 func (a *index) AdditionalPodSubscriptions(
@@ -916,6 +941,18 @@ func PushXdsAddress[T any](xds model.XDSUpdater, f func(T) string, waypointRef f
 			Reason:           model.NewReasonStats(model.AmbientUpdate),
 		})
 	}
+}
+
+func selectingWorkloadAuthzByNs(c krt.Collection[model.WorkloadAuthorization]) krt.Index[string, model.WorkloadAuthorization] {
+	return krt.NewIndex(c, "selectingWorklodAuthorizationsByNs", func(wa model.WorkloadAuthorization) []string {
+		if wa.Authorization == nil {
+			return nil // filter policy which are invalid
+		}
+		if wa.GetLabelSelector() == nil {
+			return nil
+		}
+		return []string{wa.Authorization.Namespace}
+	})
 }
 
 type MeshConfig = meshwatcher.MeshConfigResource

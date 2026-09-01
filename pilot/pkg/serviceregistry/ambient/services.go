@@ -88,7 +88,7 @@ func (a Builder) ServicesCollection(
 	})
 
 	WorkloadServices := krt.NewManyCollection(
-		allTypedServiceInfosByHostname.AsCollection(),
+		allTypedServiceInfosByHostname.AsCollection(opts.WithName("AllTypedServiceInfosByHostname")...),
 		func(ctx krt.HandlerContext, ios krt.IndexObject[string, TypedServiceInfo]) []model.ServiceInfo {
 			if len(ios.Objects) == 0 {
 				return nil
@@ -157,12 +157,8 @@ func GlobalNestedWorkloadServicesCollection(
 	localWaypoints krt.Collection[Waypoint],
 	ctrl *multicluster.Controller,
 	localServiceEntries krt.Collection[*networkingclient.ServiceEntry],
-	globalServices krt.Collection[krt.Collection[*v1.Service]],
-	servicesByCluster krt.Index[cluster.ID, krt.Collection[*v1.Service]],
 	globalWaypoints krt.Collection[krt.Collection[Waypoint]],
 	waypointsByCluster krt.Index[cluster.ID, krt.Collection[Waypoint]],
-	globalNamespaces krt.Collection[krt.Collection[*v1.Namespace]],
-	namespacesByCluster krt.Index[cluster.ID, krt.Collection[*v1.Namespace]],
 	meshConfig krt.Singleton[MeshConfig],
 	globalNetworks NetworkCollections,
 	domainSuffix string,
@@ -172,7 +168,8 @@ func GlobalNestedWorkloadServicesCollection(
 	LocalServiceInfosWithCluster := krt.MapCollection(
 		localServiceInfos,
 		wrapObjectWithCluster[model.ServiceInfo](localCluster.ID),
-		opts.WithName("LocalServiceInfosWithCluster")...)
+		opts.WithName("LocalServiceInfosWithCluster")...,
+	)
 
 	checkServiceScope := features.EnableAmbientMultiNetwork
 
@@ -202,14 +199,9 @@ func GlobalNestedWorkloadServicesCollection(
 				false,
 				checkServiceScope,
 				func(ctx krt.HandlerContext) network.ID {
-					nw := krt.FetchOne(ctx, globalNetworks.RemoteSystemNamespaceNetworks, krt.FilterIndex(globalNetworks.SystemNamespaceNetworkByCluster, cluster.ID))
-					if nw == nil {
-						log.Warnf("Cluster %s does not have network assigned yet, skipping", cluster.ID)
-						ctx.DiscardResult()
-						return ""
-					}
-					return nw.Network
-				}, false),
+					return globalNetworks.FetchRemoteSystemNamespaceNetwork(ctx, namespaces)
+				}, false,
+			),
 				append(
 					opts,
 					krt.WithName(fmt.Sprintf("ambient/ServiceServiceInfos[%s]", cluster.ID)),

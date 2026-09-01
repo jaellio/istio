@@ -201,7 +201,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 		// need SetStatusWrite called to activate their respective status queues.
 		var agwc *agentgateway.Controller
 		if features.EnableAgentgateway {
-			agwc = agentgateway.NewAgwController(s.kubeClient, s.kubeClient.CrdWatcher().WaitForCRD, args.RegistryOptions.KubeOptions)
+			agwc = agentgateway.NewAgwController(s.kubeClient, s.kubeClient.CrdWatcher().WaitForCRD, args.RegistryOptions.KubeOptions, s.ambientIndex)
 			s.environment.AgentgatewayController = agwc
 			s.agentgatewayController = agwc
 			s.ConfigStores = append(s.ConfigStores, s.environment.AgentgatewayController)
@@ -354,9 +354,8 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
 			if err != nil {
 				return fmt.Errorf("failed to dial XDS %s %v", configSource.Address, err)
 			}
-			store := memory.Make(collections.Pilot)
 			// TODO: enable namespace filter for memory controller
-			configController := memory.NewController(store)
+			configController := memory.NewController(collections.Pilot, false)
 			configController.RegisterHasSyncedHandler(xdsMCP.HasSynced)
 			xdsMCP.Store = configController
 			err = xdsMCP.Run()
