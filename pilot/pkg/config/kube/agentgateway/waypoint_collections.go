@@ -15,92 +15,75 @@
 package agentgateway
 
 import (
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"istio.io/istio/pilot/pkg/config/kube/gatewaycommon"
-	"istio.io/istio/pilot/pkg/serviceregistry/ambient"
+	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/constants"
+	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/ptr"
 )
 
-// WaypointServiceBinding maps a fronted service to the AGW waypoint Gateway that fronts it.
+// WaypointServiceBinding maps a fronted service to an AGW waypoint Gateway that fronts it.
 type WaypointServiceBinding struct {
-	// ServiceKey is the NamespacedName of the fronted service
+	// ServiceKey is the NamespacedName of the fronted service.
 	ServiceKey types.NamespacedName
-	// WaypointGateway is the NamespacedName of the waypoint Gateway
+	// WaypointGateway is the NamespacedName of the waypoint Gateway.
 	WaypointGateway types.NamespacedName
 }
 
+// ResourceName keys on both the service and the gateway so a service fronted by two AGW waypoints
+// (primary + canary) produces two distinct entries in the collection.
 func (w WaypointServiceBinding) ResourceName() string {
-	return w.ServiceKey.String()
+	return w.ServiceKey.String() + "/" + w.WaypointGateway.String()
 }
 
 func (w WaypointServiceBinding) Equals(other WaypointServiceBinding) bool {
 	return w.ServiceKey == other.ServiceKey && w.WaypointGateway == other.WaypointGateway
 }
 
-// BuildWaypointServiceBindings creates a collection mapping services to their AGW waypoint gateways.
-// For each k8s Service with a use-waypoint label (or inheriting from namespace) pointing to an
-// agentgateway-waypoint class Gateway, a WaypointServiceBinding is created.
+// BuildWaypointServiceBindings projects the shared ambient ServiceInfo collection down to
+// (k8s Service, AGW waypoint Gateway) pairs. Waypoint resolution — use-waypoint labels, namespace
+// inheritance, "none" opt-out, weighted-waypoint canary — is delegated to ambient via
+// waypointNames. Here we only keep bindings whose gateway exists and is served by the AGW
+// waypoint controller. A service split between a primary and a canary produces one binding per
+// AGW-class waypoint; non-AGW waypoints in the pair are dropped.
 func BuildWaypointServiceBindings(
-	services krt.Collection[*corev1.Service],
-	namespaces krt.Collection[*corev1.Namespace],
+	services krt.Collection[model.ServiceInfo],
 	gateways krt.Collection[*gatewayv1.Gateway],
 	gatewayClasses krt.Collection[gatewaycommon.GatewayClass],
+	waypointNames ServiceWaypointResolver,
 	opts krt.OptionsBuilder,
 ) krt.Collection[WaypointServiceBinding] {
-	return krt.NewCollection(services, func(ctx krt.HandlerContext, svc *corev1.Service) *WaypointServiceBinding {
-		// check if the service or its namespace has the use-waypoint label
-		wpRef := resolveUseWaypoint(ctx, svc.ObjectMeta, namespaces)
-		if wpRef == nil {
+	return krt.NewManyCollection(services, func(ctx krt.HandlerContext, svc model.ServiceInfo) []WaypointServiceBinding {
+		// Only project k8s Services; ServiceEntry bindings are not yet handled by consumers of this collection.
+		if svc.Source.Kind != kind.Service {
 			return nil
 		}
-
-		// Check if the referenced gateway exists. Ignore otherwise
-		gw := ptr.Flatten(krt.FetchOne(ctx, gateways, krt.FilterKey(wpRef.ResourceName())))
-		if gw == nil {
+		if waypointNames == nil {
 			return nil
 		}
-
-		// Check that the gateway has an AGW waypoint class. Ignore otherwise
-		class := gatewaycommon.FetchAgentgatewayClass(ctx, gatewayClasses, gw.Spec.GatewayClassName)
-		if class == nil || class.Controller != constants.ManagedAgentgatewayWaypointController {
+		wpNNs := waypointNames(ctx, svc)
+		if len(wpNNs) == 0 {
 			return nil
 		}
-
-		return &WaypointServiceBinding{
-			ServiceKey:      types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name},
-			WaypointGateway: types.NamespacedName{Namespace: wpRef.Namespace, Name: wpRef.Name},
+		out := make([]WaypointServiceBinding, 0, len(wpNNs))
+		for _, wpNN := range wpNNs {
+			gw := ptr.Flatten(krt.FetchOne(ctx, gateways, krt.FilterKey(wpNN.String())))
+			if gw == nil {
+				continue
+			}
+			class := gatewaycommon.FetchAgentgatewayClass(ctx, gatewayClasses, gw.Spec.GatewayClassName)
+			if class == nil || class.Controller != constants.ManagedAgentgatewayWaypointController {
+				continue
+			}
+			out = append(out, WaypointServiceBinding{
+				ServiceKey:      svc.NamespacedName(),
+				WaypointGateway: wpNN,
+			})
 		}
+		return out
 	}, opts.WithName("WaypointServiceBindings")...)
-}
-
-// resolveUseWaypoint looks up the use-waypoint label on a service or its namespace
-// and returns the referenced waypoint gateway, if any.
-func resolveUseWaypoint(
-	ctx krt.HandlerContext,
-	meta metav1.ObjectMeta,
-	namespaces krt.Collection[*corev1.Namespace],
-) *krt.Named {
-	// Check object labels first
-	// These labels take precedence over namespace labels
-	wp, isNone := ambient.GetUseWaypoint(meta, meta.Namespace)
-	if isNone {
-		return nil
-	}
-	if wp != nil {
-		return wp
-	}
-
-	// Fall back to namespace labels
-	ns := ptr.Flatten(krt.FetchOne(ctx, namespaces, krt.FilterKey(meta.Namespace)))
-	if ns == nil {
-		return nil
-	}
-	wp, _ = ambient.GetUseWaypoint(ns.ObjectMeta, meta.Namespace)
-	return wp
 }
